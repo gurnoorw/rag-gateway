@@ -12,3 +12,5 @@ data/corpus/
 bench/results/*.json
 private/
 CLAUDE.local.md
+__pycache__/
+*.pyc

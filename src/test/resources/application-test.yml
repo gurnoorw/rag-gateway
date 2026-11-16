@@ -4,6 +4,12 @@ spring:
   data:
     redis:
       host: redis-not-configured-for-this-test.invalid
+  # Every cached test context holds its own pool; 3 connections each keeps the suite well under Postgres's
+  # connection limit (raised to 300 in SharedContainers) as the number of contexts grows (D-39).
+  datasource:
+    hikari:
+      maximum-pool-size: 3
+      minimum-idle: 1
 # Provider base URLs are overridden per test to WireMock. No test reaches a real provider.
 gateway:
   providers:

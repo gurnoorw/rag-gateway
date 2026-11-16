@@ -21,7 +21,9 @@ public final class SharedContainers {
             postgres = new PostgreSQLContainer<>(TestImages.POSTGRES)
                     .withDatabaseName("raggateway")
                     .withUsername("raggateway")
-                    .withPassword("raggateway");
+                    .withPassword("raggateway")
+                    // Many cached Spring contexts each hold a pool; the default 100 is too tight for the suite.
+                    .withCommand("postgres", "-c", "max_connections=300");
             postgres.start();
         }
         return postgres;

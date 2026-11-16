@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+build/
+.gradle/
+out/
+*.iml
+.idea/
+.DS_Store
+*.log
+data/corpus/
+bench/results/*.json
+private/
+CLAUDE.local.md

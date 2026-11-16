@@ -103,6 +103,11 @@ public class JsonResponseSink implements StreamSink {
         return terminated;
     }
 
+    /** True once a write failed because the client went away. */
+    public boolean disconnected() {
+        return disconnected;
+    }
+
     // ---- helpers shared with SseResponseSink ----
 
     /** OpenAI response id: {@code chatcmpl-} + request id (D-16). */

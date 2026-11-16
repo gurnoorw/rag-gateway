@@ -42,7 +42,6 @@ import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.wireMockConfig;
 import static dev.raggateway.support.PrometheusScrape.prometheusBase;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assumptions.assumeThat;
 import static org.awaitility.Awaitility.await;
 
 /**
@@ -61,12 +60,10 @@ class DashboardMetricsIT extends AbstractIntegrationTest {
     static final Path COMPOSE = Path.of("docker-compose.yml");
 
     /**
-     * The request-level metrics recorded by {@code RequestMetricsListener} (t04-a, D-38), which is not on this
-     * branch yet. Until it is, their presence on the scrape page is an assumption: the scrape test asserts every
-     * other metric and is then reported as skipped, naming the ones still missing. B's final commit (after rebasing
-     * on t04-a) empties this set, so every metric is asserted.
+     * The request-level metrics recorded by {@code RequestMetricsListener} (t04-a, D-38). The dashboard must chart
+     * each of them; like every other metric a panel names, each must be on the scrape page.
      */
-    static final Set<String> PENDING_T04_A = Set.of(
+    static final Set<String> REQUEST_METRICS = Set.of(
             prometheusBase(MetricNames.REQUESTS) + "_total",
             prometheusBase(MetricNames.REQUEST_DURATION) + "_seconds_bucket",
             prometheusBase(MetricNames.TIME_TO_FIRST_TOKEN) + "_seconds_bucket",
@@ -175,7 +172,7 @@ class DashboardMetricsIT extends AbstractIntegrationTest {
                 .flatMap(p -> p.path("targets").valueStream()).map(t -> t.path("expr").asText()).toList();
         Set<String> named = new TreeSet<>();
         exprs.forEach(e -> named.addAll(PromQl.metricNames(e)));
-        assertThat(PENDING_T04_A).as("every pending metric is one a panel uses").isSubsetOf(named);
+        assertThat(named).as("the dashboard charts every request-level metric").containsAll(REQUEST_METRICS);
         CLAUDE.stubFor(post("/v1/messages").atPriority(5).willReturn(aResponse().withStatus(200)
                 .withHeader("Content-Type", "text/event-stream").withBody(ClaudeSse.reply(MODEL, 12, 3, "Hel", "lo"))));
         CLAUDE.stubFor(post("/v1/messages").atPriority(1).withRequestBody(containing(FAIL_PRIMARY))
@@ -203,10 +200,8 @@ class DashboardMetricsIT extends AbstractIntegrationTest {
         await().atMost(Duration.ofSeconds(10)).until(() -> ids.stream().allMatch(id -> jdbc.sql(
                 "SELECT count(*) FROM request_log WHERE request_id = ?").param(id).query(Long.class).single() == 1));
 
-        Set<String> required = new TreeSet<>(named);
-        required.removeAll(PENDING_T04_A);
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertThat(missing(PrometheusScrape.fetch(baseUrl()), required)).as("metrics missing from the scrape")
+                assertThat(missing(PrometheusScrape.fetch(baseUrl()), named)).as("metrics missing from the scrape")
                         .isEmpty());
         PrometheusScrape scrape = PrometheusScrape.fetch(baseUrl());
         List<String> labelProblems = new ArrayList<>();
@@ -220,10 +215,6 @@ class DashboardMetricsIT extends AbstractIntegrationTest {
             }
         }
         assertThat(labelProblems).as("grouping labels missing from the scrape").isEmpty();
-
-        Set<String> pendingMissing = missing(scrape, PENDING_T04_A);
-        assumeThat(pendingMissing).as("request-level metrics from t04-a (RequestMetricsListener) not merged yet")
-                .isEmpty();
     }
 
     // ---- AC-t04-4: the obs profile adds exactly Prometheus and Grafana ----

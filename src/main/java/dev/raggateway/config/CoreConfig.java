@@ -7,12 +7,10 @@ import dev.raggateway.core.TokenEstimator;
 import dev.raggateway.cost.CostCalculator;
 import dev.raggateway.cost.RequestLogWriter;
 import dev.raggateway.pipeline.DefaultGatewayPipeline;
-import dev.raggateway.pipeline.DirectProviderTerminal;
 import dev.raggateway.pipeline.GatewayFilter;
 import dev.raggateway.pipeline.GatewayPipeline;
 import dev.raggateway.pipeline.RequestCompletionListener;
 import dev.raggateway.pipeline.Terminal;
-import dev.raggateway.provider.LlmProvider;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
@@ -41,12 +39,7 @@ public class CoreConfig {
         return new RequestLogWriter(jdbc, registry, costs);
     }
 
-    /** t01 terminal: one provider, one attempt. t03 replaces it with the fallback router. */
-    @Bean
-    Terminal directProviderTerminal(ObjectProvider<LlmProvider> providers, TokenEstimator estimator) {
-        return new DirectProviderTerminal(providers.orderedStream().toList(), estimator);
-    }
-
+    /** The terminal is the t03 fallback router ({@code resilience.ResilienceConfig}). */
     @Bean
     GatewayPipeline gatewayPipeline(ObjectProvider<GatewayFilter> filters, Terminal terminal,
                                     ObjectProvider<RequestCompletionListener> listeners, MeterRegistry registry) {

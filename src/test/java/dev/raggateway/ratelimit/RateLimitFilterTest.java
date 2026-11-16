@@ -21,10 +21,10 @@ import dev.raggateway.error.RateLimitedException;
 import dev.raggateway.metrics.MetricNames;
 import dev.raggateway.pipeline.ClientDisconnectedException;
 import dev.raggateway.pipeline.DefaultGatewayPipeline;
-import dev.raggateway.pipeline.DirectProviderTerminal;
 import dev.raggateway.pipeline.FilterChain;
 import dev.raggateway.pipeline.StreamSink;
 import dev.raggateway.pipeline.Terminal;
+import dev.raggateway.resilience.RouterFixture;
 import dev.raggateway.support.FakeLlmProvider;
 import dev.raggateway.support.FakeRateLimiter;
 import dev.raggateway.support.InMemoryBudgetLedger;
@@ -216,15 +216,20 @@ class RateLimitFilterTest {
         assertThat(ledger.adds).hasValue(0);
     }
 
-    /** AC-t02-5 through the real t01 terminal: an HTTP 500 before any token bills nothing (D-34), so all comes back. */
+    /**
+     * AC-t02-5 through the real terminal (the t03 router): an HTTP 500 before any token bills nothing (D-34), on the
+     * first attempt and on its retry, so all comes back.
+     */
     @Test
-    void ac_t02_5_httpErrorBeforeFirstTokenThroughTheT01TerminalRefundsTheFullReservation() {
-        var provider = new FakeLlmProvider("claude", Set.of(OPUS)).enqueue(FakeLlmProvider.failBeforeFirstToken(500));
+    void ac_t02_5_httpErrorBeforeFirstTokenThroughTheRouterRefundsTheFullReservation() {
+        var provider = new FakeLlmProvider("claude", Set.of(OPUS)).defaultScript(FakeLlmProvider.failBeforeFirstToken(500));
         RequestContext ctx = ctx(1_000);
 
-        ClientSink sink = run(ctx, new DirectProviderTerminal(List.of(provider), new CharRatioTokenEstimator()));
+        ClientSink sink = run(ctx, RouterFixture.single(provider));
 
-        assertThat(sink.events).containsExactly("error:provider_error");
+        assertThat(sink.events).containsExactly("error:all_providers_failed");
+        assertThat(provider.calls()).isEqualTo(2);
+        assertThat(ctx.attempts()).hasSize(2);
         assertThat(ctx.billedUsage()).isEqualTo(Usage.ZERO);
         assertThat(limiter.refundCalls()).isEqualTo(1);
         assertThat(limiter.tokens(TENANT)).isEqualTo(CAPACITY);
@@ -255,7 +260,7 @@ class RateLimitFilterTest {
                 .enqueue(FakeLlmProvider.reply("aaa", "bbb", "ccc", "ddd", "eee"));
         RequestContext ctx = ctx(OPUS, 1_000, true);
 
-        run(ctx, new DirectProviderTerminal(List.of(provider), new CharRatioTokenEstimator()), new ClientSink(ctx, 2));
+        run(ctx, RouterFixture.single(provider), new ClientSink(ctx, 2));
 
         assertThat(ctx.outcome()).isEqualTo(RequestOutcome.CLIENT_CANCELLED);
         assertThat(provider.cancellations()).isEqualTo(1);
@@ -384,7 +389,7 @@ class RateLimitFilterTest {
         var provider = new FakeLlmProvider("claude", Set.of(OPUS));
         RequestContext ctx = ctx(1_000);
 
-        ClientSink sink = run(ctx, new DirectProviderTerminal(List.of(provider), new CharRatioTokenEstimator()));
+        ClientSink sink = run(ctx, RouterFixture.single(provider));
 
         assertThat(sink.events).containsExactly("error:budget_exceeded");
         var error = (GatewayException) sink.error;
@@ -414,7 +419,7 @@ class RateLimitFilterTest {
         assertThat(limiter.tryAcquire(TENANT, CAPACITY, BucketSpec.perMinute(CAPACITY)).allowed()).isTrue();
         var provider = new FakeLlmProvider("claude", Set.of(OPUS));
 
-        ClientSink sink = run(ctx(10), new DirectProviderTerminal(List.of(provider), new CharRatioTokenEstimator()));
+        ClientSink sink = run(ctx(10), RouterFixture.single(provider));
 
         assertThat(sink.events).containsExactly("error:rate_limited");
         assertThat(sink.error).isInstanceOf(RateLimitedException.class);
@@ -431,7 +436,7 @@ class RateLimitFilterTest {
     void ac_t02_8_requestLargerThanCapacityIs400AndNeverTouchesTheBucket() {
         var provider = new FakeLlmProvider("claude", Set.of(OPUS));
 
-        ClientSink sink = run(ctx(CAPACITY + 1), new DirectProviderTerminal(List.of(provider), new CharRatioTokenEstimator()));
+        ClientSink sink = run(ctx(CAPACITY + 1), RouterFixture.single(provider));
 
         assertThat(sink.events).containsExactly("error:invalid_request");
         assertThat(sink.error.getMessage()).contains("1001").contains("1000");

@@ -75,6 +75,20 @@ gateway:
   # refill-period (1m keeps the long-run rate at exactly TPM). Budget and bucket state live in Redis.
   rate-limit:
     refill-period: 1m
+  # Fallback router (t03, C20, D-07): the provider of the selected model first, then this chain. Per provider:
+  # Retry(CircuitBreaker(call)); retry only before the first token, full-jitter backoff, Retry-After capped.
+  fallback:
+    chain:
+      - provider: ollama
+        model: "llama3.2:1b"
+    max-attempts: 2
+    backoff-base: 200ms
+    backoff-cap: 2s
+    retry-after-cap: 2s
+    breaker:
+      window: 20                 # count-based; also the minimum number of calls before it can open
+      failure-rate-threshold: 50 # percent
+      open-duration: 30s         # then one trial call (half-open)
   # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
   # tools on the same machine, which could silently point the gateway at another host or account.
   providers:

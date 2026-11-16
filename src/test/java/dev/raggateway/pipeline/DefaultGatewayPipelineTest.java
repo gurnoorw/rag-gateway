@@ -3,7 +3,6 @@ package dev.raggateway.pipeline;
 import dev.raggateway.core.ApiKeyPrincipal;
 import dev.raggateway.core.AttemptOutcome;
 import dev.raggateway.core.ChatRequest;
-import dev.raggateway.core.CharRatioTokenEstimator;
 import dev.raggateway.core.Completion;
 import dev.raggateway.core.Message;
 import dev.raggateway.core.RequestContext;
@@ -13,6 +12,7 @@ import dev.raggateway.core.Tenant;
 import dev.raggateway.error.ErrorCode;
 import dev.raggateway.error.GatewayException;
 import dev.raggateway.metrics.MetricNames;
+import dev.raggateway.resilience.RouterFixture;
 import dev.raggateway.support.FakeLlmProvider;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
@@ -35,7 +35,7 @@ class DefaultGatewayPipelineTest {
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final FakeLlmProvider claude = new FakeLlmProvider("claude", Set.of(MODEL));
-    private final Terminal terminal = new DirectProviderTerminal(List.of(claude), new CharRatioTokenEstimator());
+    private final Terminal terminal = RouterFixture.single(claude);
 
     static RequestContext ctx(boolean stream) {
         var tenant = new Tenant("t1", "Tenant 1", 10_000, BigDecimal.TEN, Set.of());
@@ -189,16 +189,17 @@ class DefaultGatewayPipelineTest {
     }
 
     @Test
-    void providerFailureBeforeFirstTokenIs502() {
-        claude.enqueue(FakeLlmProvider.failBeforeFirstToken(503));
+    void providerFailureBeforeFirstTokenIsAnErrorStatus() {
+        // The terminal is the t03 router: a retryable failure on the only provider, twice, is a 503.
+        claude.defaultScript(FakeLlmProvider.failBeforeFirstToken(503));
         RequestContext ctx = ctx(true);
         var sink = new ClientSink(ctx);
 
         pipeline(List.of()).run(ctx, sink);
 
-        assertThat(sink.events).containsExactly("error:provider_error");
-        assertThat(ctx.httpStatus()).isEqualTo(502);
-        assertThat(ctx.errorCode()).isEqualTo(ErrorCode.PROVIDER_ERROR);
+        assertThat(sink.events).containsExactly("error:all_providers_failed");
+        assertThat(ctx.httpStatus()).isEqualTo(503);
+        assertThat(ctx.errorCode()).isEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
     }
 
     @Test

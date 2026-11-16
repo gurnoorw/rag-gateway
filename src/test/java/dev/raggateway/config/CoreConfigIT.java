@@ -14,13 +14,13 @@ import dev.raggateway.core.TokenEstimator;
 import dev.raggateway.cost.RequestLogWriter;
 import dev.raggateway.error.ErrorCode;
 import dev.raggateway.pipeline.DefaultGatewayPipeline;
-import dev.raggateway.pipeline.DirectProviderTerminal;
 import dev.raggateway.pipeline.GatewayPipeline;
 import dev.raggateway.pipeline.RequestCompletionListener;
 import dev.raggateway.pipeline.StreamSink;
 import dev.raggateway.pipeline.Terminal;
 import dev.raggateway.provider.LlmProvider;
 import dev.raggateway.provider.claude.ClaudeProvider;
+import dev.raggateway.resilience.FallbackRouter;
 import dev.raggateway.support.AbstractIntegrationTest;
 import dev.raggateway.support.TestData;
 import org.junit.jupiter.api.Test;
@@ -36,8 +36,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The t01 beans are wired in the real application context, and the pipeline runs end to end on them:
- * key lookup, terminal, Claude adapter (pointed at an unroutable port by the test profile), request log.
+ * The core beans are wired in the real application context, and the pipeline runs end to end on them:
+ * key lookup, terminal (the t03 fallback router), Claude adapter (pointed at an unroutable port by the test
+ * profile), request log.
  * The HTTP edge is Dev A's; the HTTP end-to-end test is ChatCompletionsE2EIT (after both branches merge).
  */
 class CoreConfigIT extends AbstractIntegrationTest {
@@ -52,7 +53,7 @@ class CoreConfigIT extends AbstractIntegrationTest {
     @Test
     void t01BeansAreWired() {
         assertThat(pipeline).isInstanceOf(DefaultGatewayPipeline.class);
-        assertThat(terminal).isInstanceOf(DirectProviderTerminal.class);
+        assertThat(terminal).isInstanceOf(FallbackRouter.class);
         assertThat(authenticator).isInstanceOf(JdbcApiKeyAuthenticator.class);
         assertThat(estimator).isNotNull();
         assertThat(providers).hasAtLeastOneElementOfType(ClaudeProvider.class);
@@ -60,7 +61,7 @@ class CoreConfigIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void unreachableProviderGives502AndOneLogRow() {
+    void unreachableProvidersGive503AfterARetryAndOneLogRow() {
         TestData.insertTenant(jdbc, "acme", 10_000, BigDecimal.TEN, Set.of());
         String key = "rgw_test-" + UUID.randomUUID();
         TestData.insertKey(jdbc, "acme", key, Set.of(), false);
@@ -87,17 +88,21 @@ class CoreConfigIT extends AbstractIntegrationTest {
 
         assertThat(errors).hasSize(1);
         assertThat(ctx.outcome()).isEqualTo(RequestOutcome.ERROR);
-        assertThat(ctx.errorCode()).isEqualTo(ErrorCode.PROVIDER_ERROR);
-        assertThat(ctx.attempts()).singleElement()
-                .satisfies(a -> assertThat(a.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN));
+        assertThat(ctx.errorCode()).isEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
+        // Connection refused is retryable: two attempts on Claude, then two on the Ollama fallback (the same
+        // unroutable port in the test profile).
+        assertThat(ctx.attempts()).extracting(a -> a.provider() + "/" + a.fallback())
+                .containsExactly("claude/false", "claude/false", "ollama/true", "ollama/true");
+        assertThat(ctx.attempts())
+                .allSatisfy(a -> assertThat(a.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN));
         // Scoped to this request's id (TEAM_RULES): rows of other tests may still be arriving.
         Map<String, Object> row = jdbc.sql("SELECT * FROM request_log WHERE request_id = ?")
                 .param(UUID.fromString(ctx.requestId())).query().singleRow();
         assertThat(row).containsEntry("request_id", UUID.fromString(ctx.requestId()))
                 .containsEntry("tenant_id", "acme")
-                .containsEntry("provider_used", "claude")
+                .containsEntry("provider_used", "ollama")
                 .containsEntry("status", "error")
-                .containsEntry("error_code", "provider_error");
-        assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(502);
+                .containsEntry("error_code", "all_providers_failed");
+        assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(503);
     }
 }

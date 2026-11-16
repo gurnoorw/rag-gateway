@@ -73,8 +73,14 @@ def rate_trues(metrics, name):
     return int(metrics[name]["passes"])
 
 
-def diff_pcts(a, b):
-    return {key: r(a[stat] - b[stat]) for key, stat, _ in PCTS}
+def diff_pcts(a, b, notes=None, what=""):
+    out = {key: r(a[stat] - b[stat]) for key, stat, _ in PCTS}
+    negative = [k for k, v in out.items() if v < 0]
+    if negative and notes is not None:
+        notes.append(f"{what}: the {'/'.join(negative)} difference is negative, i.e. that percentile was lower on "
+                     "the measured side than on the reference side in this run (the two sides ran one after the "
+                     "other on shared CPUs)")
+    return out
 
 
 def psql_json(sql):
@@ -119,8 +125,10 @@ def overhead(inp, man, notes, out):
         "requests": requests,
         "arrival_rate_per_s": man["params"]["overhead_rate"],
         "added_latency_seen_by_client_ms": {
-            "ttfb": diff_pcts(trend(gw, "http_req_waiting"), trend(direct, "http_req_waiting")),
-            "total": diff_pcts(trend(gw, "http_req_duration"), trend(direct, "http_req_duration")),
+            "ttfb": diff_pcts(trend(gw, "http_req_waiting"), trend(direct, "http_req_waiting"), notes,
+                                 "scenario 1 added ttfb (gateway minus direct)"),
+            "total": diff_pcts(trend(gw, "http_req_duration"), trend(direct, "http_req_duration"), notes,
+                                  "scenario 1 added total time (gateway minus direct)"),
         },
         "gateway_processing_overhead_ms": hist_pcts_ms(
             prom.delta(after["gateway_overhead_seconds"], before["gateway_overhead_seconds"]), notes,
@@ -210,7 +218,8 @@ def fallback(inp, man, notes, out):
         "primary_killed_at_s": r((kill["kill_epoch_ms"] - start) / 1000, 2),
         "requests_after_kill": after_total,
         "success_rate_after_kill": r(count(m, "after_ok") / after_total, 4),
-        "added_latency_ms": diff_pcts(trend(m, "after_duration"), trend(m, "before_duration")),
+        "added_latency_ms": diff_pcts(trend(m, "after_duration"), trend(m, "before_duration"), notes,
+                                      "scenario 5 added latency (after minus before the kill)"),
     }
     notes.append(f"scenario 5: open load {man['params']['fallback_rate']}/s for {man['params']['fallback_duration']}; "
                  f"mock-claude killed (docker kill, SIGKILL) at the stated second, the command took "
@@ -262,21 +271,35 @@ def redis_down(inp, man, notes, out):
     for mode in ("refused", "blackholed"):
         m = inp.k6(f"6b-{mode}")
         started, done = count(m, "requests_started"), count(m, "requests_completed")
-        block[mode] = {"added_ms": diff_pcts(trend(m, "http_req_duration"), base),
+        block[mode] = {"added_ms": diff_pcts(trend(m, "http_req_duration"), base, notes, f"scenario 6b {mode}"),
                        "requests": started,
                        "errors": started - done}
-        notes.append(f"scenario 6b {mode}: {started} requests started, {done} completed, {count(m, 'http_reqs')} "
-                     f"got a response before the end (the added latency is over those), "
-                     f"{rate_trues(m, 'stream_errors')} responses were not a completed stream, "
-                     f"{started - count(m, 'http_reqs')} were still waiting when k6's 60 s graceful stop ended; "
-                     f"k6 dropped {count(m, 'dropped_iterations')} scheduled arrivals (no free VU)")
+        timeouts = k6_request_timeouts(inp, f"6b-{mode}")
+        capped = [key for key, stat, _ in PCTS if m["http_req_duration"][stat] >= K6_REQUEST_TIMEOUT_MS - 1]
+        notes.append(f"scenario 6b {mode}: {started} requests started, {done} completed with [DONE], "
+                     f"{timeouts} ended at k6's {K6_REQUEST_TIMEOUT_MS // 1000} s request timeout with no response, "
+                     f"{started - count(m, 'http_reqs')} were still running when k6's 60 s graceful stop ended; "
+                     f"k6 dropped {count(m, 'dropped_iterations')} scheduled arrivals (no free VU, so the arrival "
+                     "rate was not held)"
+                     + (f"; the {'/'.join(capped)} added latency is capped by that timeout (a lower bound: those "
+                        "requests waited at least that long)" if capped else ""))
     out["redis_down_from_start"] = block
     probe = inp.json("6b-blackhole-probe")
     notes.append(f"scenario 6b: the scenario 1 gateway load at {man['params']['overhead_rate']}/s for "
                  f"{man['params']['redis_down_duration']}, app started with Redis stopped (refused) and with "
                  f"REDIS_HOST={probe['host']} (a connect attempt timed out after {probe['timeout_s']} s with no "
-                 "answer: black-holed); added = total time (http_req_duration) minus scenario 1's gateway leg, per "
-                 "percentile, k6 client-side; errors = responses that were not a completed stream")
+                 "answer: black-holed); added = total time (http_req_duration, every request that ended, k6 "
+                 "timeouts included) minus scenario 1's gateway leg, per percentile, k6 client-side; errors = "
+                 "requests started minus requests completed with [DONE]")
+
+
+K6_REQUEST_TIMEOUT_MS = 60000   # postChat's default timeout in bench/k6/lib.js
+
+
+def k6_request_timeouts(inp, name):
+    """k6 reports a request that hit its timeout only as a warning line in its own output (status 0)."""
+    with open(os.path.join(inp.results, f"{inp.run_id}-{name}.log"), errors="replace") as f:
+        return sum(1 for line in f if "request timeout" in line)
 
 
 def log_slice(facts):
@@ -391,7 +414,7 @@ def build(results, run_id):
             continue
         try:
             fn(inp, man, notes, scenarios)
-        except (OSError, KeyError, ValueError) as e:
+        except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as e:
             failures.append(f"scenario {sid}: {type(e).__name__}: {e}")
     if failures:
         raise SystemExit("summary not written:\n  " + "\n  ".join(failures))

@@ -7,7 +7,8 @@
 #   bash bench/run-all.sh --measured-on "<label>" --only 1,8     # a subset (6b and 8 need 1, 7b needs 7)
 #
 # --measured-on is required and has no default, so no run can carry the wrong hardware label (C14).
-# --allow-dirty runs uncommitted code but writes the summary to bench/results/ (gitignored), not bench/summary/:
+# --allow-dirty runs uncommitted code (or a probe) and always writes the summary to bench/results/ (gitignored),
+# never bench/summary/:
 # a committed summary always names a commit that holds the code that produced it.
 #
 # Steps: build the jar; start Postgres, Redis and the WireMock mocks (compose profile "mock"); start the app as
@@ -110,7 +111,8 @@ SLUG=$(printf '%s' "$MEASURED_ON" | tr 'A-Z' 'a-z' | sed -E 's/[^a-z0-9]+/-/g; s
 RUN_ID="$RUN_TS-$SLUG"
 PREFIX="bench-$(printf '%s' "$RUN_TS" | tr 'A-Z' 'a-z')"
 RESULTS="bench/results"
-if [ "$ALLOW_DIRTY" = true ] && [ -n "$DIRTY" ]; then OUT="$RESULTS/$RUN_ID-summary.json"; else OUT="bench/summary/$RUN_ID.json"; fi
+# --allow-dirty always means "not for committing", also on a clean tree, so a probe never lands in bench/summary/.
+if [ "$ALLOW_DIRTY" = true ]; then OUT="$RESULTS/$RUN_ID-summary.json"; else OUT="bench/summary/$RUN_ID.json"; fi
 mkdir -p "$RESULTS" bench/summary
 [ ! -e "$OUT" ] || { echo "error: $OUT already exists" >&2; exit 1; }
 R="$RESULTS/$RUN_ID"          # prefix of every raw file of this run

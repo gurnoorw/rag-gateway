@@ -1,4 +1,9 @@
 # Test profile. Datasource and Redis come from Testcontainers (support/AbstractIntegrationTest).
+# A full-app test that does not register Redis gets this unresolvable host and fails loudly (D-35).
+spring:
+  data:
+    redis:
+      host: redis-not-configured-for-this-test.invalid
 # Provider base URLs are overridden per test to WireMock. No test reaches a real provider.
 gateway:
   providers:

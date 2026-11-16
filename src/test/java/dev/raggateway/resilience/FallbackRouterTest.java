@@ -463,6 +463,33 @@ class FallbackRouterTest {
     }
 
     @Test
+    void theFirstRetryWaitsUpToTheBaseAndEachLaterOneDoublesTheWindow() {
+        // Resilience4j numbers the first retry 1, so its window is base × 2^0 (D-07). Highest draw = the ceiling.
+        var props = new FallbackProperties(CHAIN, 3, Duration.ofMillis(2), Duration.ofMillis(100), null, null);
+        var highest = new java.util.random.RandomGenerator() {
+            @Override
+            public long nextLong() {
+                return 0;
+            }
+
+            @Override
+            public long nextLong(long bound) {
+                return bound - 1;
+            }
+        };
+        var retries = io.github.resilience4j.retry.RetryRegistry.of(ResilienceConfig.retryConfig(props,
+                new FullJitterBackoff(props.backoffBase(), props.backoffCap(), props.retryAfterCap(), () -> highest)));
+        var router = new FallbackRouter(List.of(claude, ollama), CHAIN, fx.breakers, retries,
+                new dev.raggateway.core.CharRatioTokenEstimator(), fx.meters);
+        List<Duration> waits = new ArrayList<>();
+        retries.retry("claude").getEventPublisher().onRetry(e -> waits.add(e.getWaitInterval()));
+
+        router.call(ctx(OPUS), new Sink());
+
+        assertThat(waits).containsExactly(Duration.ofMillis(2), Duration.ofMillis(4));
+    }
+
+    @Test
     void maxAttemptsBoundsTheCallsPerProvider() {
         var fixture = new RouterFixture(List.of(claude, ollama), new FallbackProperties(CHAIN, 3, null, null, null, null));
 

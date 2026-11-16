@@ -12,8 +12,11 @@ import org.springframework.stereotype.Component;
 
 /**
  * Resolves the model before the cache lookup (DECISIONS.md C3), so later steps and the cache key see
- * the resolved model. Writes the resolved model into the context's request and the rule name (null for
- * an explicit model) into {@code routeRule}, which the edge returns as {@code X-Gateway-Route-Rule}.
+ * the resolved model (AC-t06-8): the rate-limit reservation, the router's primary and pricing all read
+ * {@code ctx.request().model()} after this filter. Writes the resolved model into the context's request and
+ * the rule name ({@code default} when no rule matched, null for an explicit model) into {@code routeRule},
+ * which the edge returns as {@code X-Gateway-Route-Rule} and the request log stores as {@code route_rule}.
+ * A rejection (400 unknown model, 403 {@code model_not_allowed}) ends the request before any provider call.
  */
 @Component
 @Order(FilterOrder.MODEL_SELECTION)

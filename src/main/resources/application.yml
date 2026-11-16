@@ -71,6 +71,21 @@ gateway:
       upstream-id: "llama3.2:1b"
       input-usd-per-mtok: 0
       output-usd-per-mtok: 0
+  # Model routing for "model":"auto" (t06, D-42). Rules in order, first match wins; a rule whose model the tenant
+  # may not use is skipped; no match -> default-model (route rule "default"), or 403 model_not_allowed if the tenant
+  # may not use it either. Conditions in "when" are optional and AND-ed: max-input-tokens / min-input-tokens
+  # (estimated input, D-11), max-output-tokens (the request's max_tokens), has-schema. Every model must be in
+  # gateway.models or startup fails. Rule names are lower-case identifiers (header, log row, metric label).
+  # Tiers (D-08): cheap = claude-haiku-5-5, strong and default = claude-opus-5-5.
+  routing:
+    default-model: claude-opus-5-5
+    rules:
+      - name: short            # short prompt, small answer, no structured output -> cheap tier
+        model: claude-haiku-5-5
+        when:
+          max-input-tokens: 2000
+          max-output-tokens: 1024
+          has-schema: false
   # Token bucket per tenant (t02): capacity = the tenant's tokens_per_minute; an empty bucket refills in
   # refill-period (1m keeps the long-run rate at exactly TPM). Budget and bucket state live in Redis.
   rate-limit:

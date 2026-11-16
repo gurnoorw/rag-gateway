@@ -20,7 +20,9 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.Locale;
@@ -42,7 +44,7 @@ import java.util.function.LongSupplier;
  *   <li><b>Hit.</b> The stored content as one token, then {@code onComplete} with {@link Usage#ZERO}; no
  *       {@code chain.next}, so no attempt, no cost, and the log row and metrics name the provider {@code cache}.</li>
  *   <li><b>Miss, single-flight.</b> {@code tryLock}. The holder (a token, {@link ResponseCache#FAILED_OPEN}
- *       included) reads once more, then calls {@code chain.next} through a recording wrapper and unlocks with its own
+ *       included) reads once more (not after {@code FAILED_OPEN}), then calls {@code chain.next} through a recording wrapper and unlocks with its own
  *       token in {@code finally}. A request that did not get the lock polls every {@code pollInterval}: a stored
  *       answer is a hit; a free lock makes it the holder (the previous holder failed or finished without storing);
  *       after {@code lockTtl} it calls through without the lock. The time spent waiting is a deliberate wait
@@ -64,9 +66,11 @@ import java.util.function.LongSupplier;
  * those errors ({@code gateway.cache.errors}); this filter counts one {@code gateway.cache.lookups{result}} per
  * request.
  *
- * <p>The bean is declared when the store and key implementations are on {@code main} (t05 integration, B's final
- * commit); until then the filter is wired by hand in tests.
+ * <p>A {@code FAILED_OPEN} holder still stores a qualifying answer: a {@code tryLock} that timed out on the client
+ * may still have taken the lock on Redis (with a token nobody holds, until {@code lockTtl}), and the waiters behind
+ * that lock can then only be served by the stored answer.
  */
+@Component
 @Order(FilterOrder.CACHE)
 public class CacheFilter implements GatewayFilter {
 
@@ -78,6 +82,7 @@ public class CacheFilter implements GatewayFilter {
     private final MeterRegistry registry;
     private final LongSupplier nanoClock;
 
+    @Autowired
     public CacheFilter(ResponseCache cache, CacheKeyStrategy keys, CacheProperties properties, MeterRegistry registry) {
         this(cache, keys, properties, registry, System::nanoTime);
     }

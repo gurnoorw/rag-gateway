@@ -571,6 +571,27 @@ class CacheFilterTest {
         assertThat(store.failing(false).size()).isZero();
     }
 
+    @Test
+    void aFailedOpenLockStillStoresTheAnswerForTheWaitersBehindAnOrphanedLock() {
+        // tryLock timed out on the client but may have set the lock on Redis with a token nobody holds:
+        // waiters behind that lock can only be served by the stored answer.
+        String orphan = store.tryLock(key(ACME, request(0.0, "hello")), Duration.ofSeconds(10)).orElseThrow();
+        cache.lockFailsOpen = true;
+        claude.defaultScript(reply("filled"));
+        ChatRequest cold = request(0.0, "hello");
+
+        Result holder = run(ACME, cold);
+        cache.lockFailsOpen = false;
+        Result waiter = run(ACME, cold);
+
+        assertThat(holder.status()).isEqualTo(CacheStatus.MISS);
+        assertThat(store.get(key(ACME, cold)).orElseThrow().content()).isEqualTo("filled");
+        assertThat(waiter.status()).isEqualTo(CacheStatus.HIT);
+        assertThat(waiter.text()).isEqualTo("filled");
+        assertThat(claude.calls()).isEqualTo(1);
+        assertThat(orphan).isNotBlank();
+    }
+
     // ---- fakes ----
 
     /** Client sink: records what the client would see; can simulate a client that goes away. */
@@ -623,6 +644,7 @@ class CacheFilterTest {
         final Set<Long> refusedThreads = ConcurrentHashMap.newKeySet();
         volatile Runnable onPut = () -> { };
         volatile boolean refuseLocks;
+        volatile boolean lockFailsOpen;
 
         CountingCache(ResponseCache delegate) {
             this.delegate = delegate;
@@ -643,6 +665,7 @@ class CacheFilterTest {
         @Override
         public Optional<String> tryLock(String key, Duration ttl) {
             locks.incrementAndGet();
+            if (lockFailsOpen) return Optional.of(FAILED_OPEN);
             Optional<String> token = refuseLocks ? Optional.empty() : delegate.tryLock(key, ttl);
             if (token.isEmpty()) refusedThreads.add(Thread.currentThread().threadId());
             return token;

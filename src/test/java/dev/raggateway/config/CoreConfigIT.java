@@ -89,17 +89,18 @@ class CoreConfigIT extends AbstractIntegrationTest {
         assertThat(errors).hasSize(1);
         assertThat(ctx.outcome()).isEqualTo(RequestOutcome.ERROR);
         assertThat(ctx.errorCode()).isEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
-        // Connection refused is retryable: two attempts on Claude; the Ollama fallback (same unroutable port in the
-        // test profile) adds two more only where its adapter exists.
-        assertThat(ctx.attempts()).hasSizeGreaterThanOrEqualTo(2)
+        // Connection refused is retryable: two attempts on Claude, then two on the Ollama fallback (the same
+        // unroutable port in the test profile).
+        assertThat(ctx.attempts()).extracting(a -> a.provider() + "/" + a.fallback())
+                .containsExactly("claude/false", "claude/false", "ollama/true", "ollama/true");
+        assertThat(ctx.attempts())
                 .allSatisfy(a -> assertThat(a.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN));
-        assertThat(ctx.attempts().subList(0, 2)).allSatisfy(a -> assertThat(a.provider()).isEqualTo("claude"));
         // Scoped to this request's id (TEAM_RULES): rows of other tests may still be arriving.
         Map<String, Object> row = jdbc.sql("SELECT * FROM request_log WHERE request_id = ?")
                 .param(UUID.fromString(ctx.requestId())).query().singleRow();
         assertThat(row).containsEntry("request_id", UUID.fromString(ctx.requestId()))
                 .containsEntry("tenant_id", "acme")
-                .containsEntry("provider_used", ctx.servingAttempt().orElseThrow().provider())
+                .containsEntry("provider_used", "ollama")
                 .containsEntry("status", "error")
                 .containsEntry("error_code", "all_providers_failed");
         assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(503);

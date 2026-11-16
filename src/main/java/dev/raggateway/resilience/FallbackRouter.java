@@ -43,7 +43,7 @@ import java.util.function.LongSupplier;
  * Resilience4j). Replaces the t01 direct terminal.
  *
  * <p>The chain is the provider serving the selected model, then each {@code gateway.fallback.chain} entry
- * {@code {provider, model}} (an entry equal to an earlier step, or whose provider has no adapter, is skipped).
+ * {@code {provider, model}} (an entry equal to an earlier step is skipped).
  * Each provider step runs {@code Retry(CircuitBreaker(adapter.stream))}:
  * <ul>
  *   <li><b>Retry on the same provider</b> only when {@link ProviderException#retryable()} <b>and</b> no token
@@ -74,7 +74,7 @@ public final class FallbackRouter implements Terminal {
     private static final Logger log = LoggerFactory.getLogger(FallbackRouter.class);
 
     private final List<LlmProvider> providers;
-    private final List<ChainEntry> chain;
+    private final List<Step> chain;
     private final CircuitBreakerRegistry breakers;
     private final RetryRegistry retries;
     private final TokenEstimator estimator;
@@ -83,7 +83,7 @@ public final class FallbackRouter implements Terminal {
 
     /**
      * @param providers adapters, in bean order; the first that supports the selected model is the primary
-     * @param chain     fallback steps after the primary (C20)
+     * @param chain     fallback steps after the primary (C20); each must have an adapter, else this throws
      * @param breakers  registry whose default config is {@link ResilienceConfig#breakerConfig}; one breaker per
      *                  provider name
      * @param retries   registry whose default config is {@link ResilienceConfig#retryConfig}; one retry per
@@ -97,7 +97,10 @@ public final class FallbackRouter implements Terminal {
     FallbackRouter(List<LlmProvider> providers, List<ChainEntry> chain, CircuitBreakerRegistry breakers,
                    RetryRegistry retries, TokenEstimator estimator, MeterRegistry meters, LongSupplier nanoClock) {
         this.providers = List.copyOf(providers);
-        this.chain = List.copyOf(chain);
+        this.chain = chain.stream().map(e -> new Step(this.providers.stream()
+                .filter(p -> p.name().equals(e.provider()) && p.supports(e.model())).findFirst()
+                .orElseThrow(() -> new IllegalStateException("gateway.fallback.chain: no adapter serves "
+                        + e.provider() + "/" + e.model())), e.model())).toList();
         this.breakers = Objects.requireNonNull(breakers, "breakers");
         this.retries = Objects.requireNonNull(retries, "retries");
         this.estimator = Objects.requireNonNull(estimator, "estimator");
@@ -147,17 +150,13 @@ public final class FallbackRouter implements Terminal {
                 "all providers failed (" + String.join("; ", failures) + ")", lastCause));
     }
 
-    /** The primary, then each chain entry with an adapter that serves its model, without repeats. */
+    /** The primary, then each chain entry, without repeats. */
     private List<Step> steps(LlmProvider primary, String model) {
         List<Step> steps = new ArrayList<>();
         steps.add(new Step(primary, model));
-        for (ChainEntry entry : chain) {
-            LlmProvider p = providers.stream()
-                    .filter(x -> x.name().equals(entry.provider()) && x.supports(entry.model()))
-                    .findFirst().orElse(null);
-            if (p == null) continue; // reported at startup by ResilienceConfig
-            boolean repeat = steps.stream().anyMatch(s -> s.provider() == p && s.model().equals(entry.model()));
-            if (!repeat) steps.add(new Step(p, entry.model()));
+        for (Step next : chain) {
+            boolean repeat = steps.stream().anyMatch(x -> x.provider() == next.provider() && x.model().equals(next.model()));
+            if (!repeat) steps.add(next);
         }
         return steps;
     }

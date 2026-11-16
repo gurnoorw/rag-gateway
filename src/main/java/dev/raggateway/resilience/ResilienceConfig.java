@@ -13,8 +13,6 @@ import io.github.resilience4j.micrometer.tagged.TaggedCircuitBreakerMetrics;
 import io.github.resilience4j.retry.RetryConfig;
 import io.github.resilience4j.retry.RetryRegistry;
 import io.micrometer.core.instrument.MeterRegistry;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,13 +31,11 @@ import java.util.Map;
  *       state is exported from the first scrape: {@code resilience4j_circuitbreaker_state{name="claude",state=...}}
  *       through {@link TaggedCircuitBreakerMetrics} (AC-t03-10).</li>
  *   <li>One {@code Retry} per provider, same config for all.</li>
- *   <li>The chain is checked at startup: every entry must name a catalog model served by that provider.</li>
+ *   <li>The chain is checked at startup: every entry must name a catalog model of that provider.</li>
  * </ul>
  */
 @Configuration(proxyBeanMethods = false)
 public class ResilienceConfig {
-
-    private static final Logger log = LoggerFactory.getLogger(ResilienceConfig.class);
 
     @Bean
     CircuitBreakerRegistry providerCircuitBreakers(FallbackProperties properties, ObjectProvider<LlmProvider> providers,
@@ -61,7 +57,7 @@ public class ResilienceConfig {
                             ObjectProvider<LlmProvider> providers, CircuitBreakerRegistry providerCircuitBreakers,
                             RetryRegistry providerRetries, TokenEstimator estimator, MeterRegistry meters) {
         List<LlmProvider> adapters = providers.orderedStream().toList();
-        for (String warning : checkChain(properties.chain(), gateway.models(), adapters)) log.warn(warning);
+        checkChain(properties.chain(), gateway.models());
         return new FallbackRouter(adapters, properties.chain(), providerCircuitBreakers, providerRetries, estimator,
                 meters);
     }
@@ -100,13 +96,12 @@ public class ResilienceConfig {
     }
 
     /**
-     * Fails startup for a chain entry whose model is not in the catalog or belongs to another provider; returns
-     * a warning for an entry whose provider has no adapter bean (the router skips it).
+     * Fails startup for a chain entry whose model is not in the catalog or belongs to another provider. That the
+     * provider has an adapter follows from the catalog check ({@code ProviderCatalogCheck}) and is enforced again
+     * by the router's constructor.
      */
-    static List<String> checkChain(List<ChainEntry> chain, Map<String, ModelProperties> catalog,
-                                   List<LlmProvider> adapters) {
+    static void checkChain(List<ChainEntry> chain, Map<String, ModelProperties> catalog) {
         List<String> errors = new ArrayList<>();
-        List<String> warnings = new ArrayList<>();
         for (ChainEntry e : chain) {
             ModelProperties m = catalog.get(e.model());
             if (m == null) {
@@ -114,12 +109,8 @@ public class ResilienceConfig {
             } else if (!e.provider().equals(m.provider())) {
                 errors.add("gateway.fallback.chain: model '" + e.model() + "' belongs to provider '" + m.provider()
                         + "', not '" + e.provider() + "'");
-            } else if (adapters.stream().noneMatch(a -> a.name().equals(e.provider()) && a.supports(e.model()))) {
-                warnings.add("gateway.fallback.chain: no adapter serves " + e.provider() + "/" + e.model()
-                        + "; the router skips this entry");
             }
         }
         if (!errors.isEmpty()) throw new IllegalStateException(String.join("; ", errors));
-        return warnings;
     }
 }

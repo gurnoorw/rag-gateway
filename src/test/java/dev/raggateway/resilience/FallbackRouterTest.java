@@ -564,15 +564,9 @@ class FallbackRouterTest {
     }
 
     @Test
-    void aChainEntryWithoutAnAdapterIsSkipped() {
-        var router = new RouterFixture(List.of(claude), CHAIN).router; // no Ollama adapter
-        RequestContext ctx = ctx(OPUS);
-        var sink = new Sink();
-
-        router.call(ctx, sink);
-
-        assertThat(sink.error().code()).isEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
-        assertThat(ctx.attempts()).hasSize(2);
+    void aChainEntryWithoutAnAdapterIsRejectedAtConstruction() {
+        assertThatThrownBy(() -> new RouterFixture(List.of(claude), CHAIN))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("no adapter serves ollama/" + LLAMA);
     }
 
     @Test
@@ -613,17 +607,15 @@ class FallbackRouterTest {
     // ---- startup check of the chain ----
 
     @Test
-    void chainCheckRejectsUnknownModelsAndProviderMismatchesAndWarnsOnMissingAdapters() {
+    void chainCheckRejectsUnknownModelsAndProviderMismatches() {
         Map<String, ModelProperties> catalog = Map.of(
                 OPUS, new ModelProperties("claude", OPUS, BigDecimal.ONE, BigDecimal.ONE),
                 LLAMA, new ModelProperties("ollama", LLAMA, BigDecimal.ZERO, BigDecimal.ZERO));
 
-        assertThat(ResilienceConfig.checkChain(CHAIN, catalog, List.of(claude, ollama))).isEmpty();
-        assertThat(ResilienceConfig.checkChain(CHAIN, catalog, List.of(claude))).singleElement()
-                .asString().contains("no adapter serves ollama/" + LLAMA);
-        assertThatThrownBy(() -> ResilienceConfig.checkChain(List.of(new ChainEntry("ollama", "llama9")), catalog,
-                List.of(ollama))).isInstanceOf(IllegalStateException.class).hasMessageContaining("'llama9' is not in");
-        assertThatThrownBy(() -> ResilienceConfig.checkChain(List.of(new ChainEntry("claude", LLAMA)), catalog,
-                List.of(claude))).isInstanceOf(IllegalStateException.class).hasMessageContaining("belongs to provider");
+        ResilienceConfig.checkChain(CHAIN, catalog);
+        assertThatThrownBy(() -> ResilienceConfig.checkChain(List.of(new ChainEntry("ollama", "llama9")), catalog))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("'llama9' is not in");
+        assertThatThrownBy(() -> ResilienceConfig.checkChain(List.of(new ChainEntry("claude", LLAMA)), catalog))
+                .isInstanceOf(IllegalStateException.class).hasMessageContaining("belongs to provider");
     }
 }

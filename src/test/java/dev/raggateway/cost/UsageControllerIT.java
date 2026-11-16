@@ -36,7 +36,7 @@ import static org.awaitility.Awaitility.await;
 /**
  * {@code GET /v1/usage} over real HTTP against the request log in Postgres (AC-t02-9), plus the cost path end to
  * end: a request through the gateway (Claude played by WireMock) writes a log row whose cost equals the budget
- * increment in Redis (D-33). Uses this branch's pre-merge limiter bean.
+ * increment in Redis (D-33).
  */
 class UsageControllerIT extends AbstractIntegrationTest {
 

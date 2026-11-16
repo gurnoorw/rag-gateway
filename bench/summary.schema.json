@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Benchmark run summary (t08)",
+  "description": "One file per run: bench/summary/<run_id>.json, written by bench/run-all.sh and committed. Every number in the README's measured table must be read from one of these files (scripts/check_readme_numbers.py). Latencies are milliseconds, rates are fractions in [0,1], money is USD. A scenario that was not run is absent, never zero. See docs/process/WORK_PLAN.md (t08) and DECISIONS.md D-45.",
+  "type": "object",
+  "required": ["run_id", "measured_on", "date", "git_commit", "setup", "scenarios"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{4}Z-[a-z0-9-]+$", "description": "UTC start time and a slug of measured_on, e.g. 20261116T2130Z-cloud-container"},
+    "measured_on": {"type": "string", "minLength": 3, "description": "Hardware label given with --measured-on; required, never defaulted (e.g. 'cloud container, 4 vCPU / 15 GB' or '8 GB MacBook Air')"},
+    "date": {"type": "string", "format": "date"},
+    "git_commit": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "setup": {
+      "type": "object",
+      "required": ["jvm_xmx", "virtual_threads", "mock_latency", "load_generator_shares_host", "k6_image", "price_date"],
+      "additionalProperties": false,
+      "properties": {
+        "jvm_xmx": {"type": "string"},
+        "virtual_threads": {"type": "boolean"},
+        "mock_latency": {"type": "string", "description": "e.g. 'first chunk after 300 ms, 10 chunks over 1 s'"},
+        "load_generator_shares_host": {"type": "boolean"},
+        "k6_image": {"type": "string"},
+        "price_date": {"type": "string", "description": "date of the list prices in gateway.models (D-08)"},
+        "notes": {"type": "string"}
+      }
+    },
+    "scenarios": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "overhead": {"$ref": "#/$defs/overhead"},
+        "cache_hit_latency": {"$ref": "#/$defs/latency_with_count"},
+        "cache_hit_rate": {
+          "type": "object", "additionalProperties": false,
+          "required": ["configured_repeat_share", "measured_hit_rate", "requests"],
+          "properties": {
+            "configured_repeat_share": {"$ref": "#/$defs/fraction"},
+            "measured_hit_rate": {"$ref": "#/$defs/fraction"},
+            "requests": {"type": "integer", "minimum": 1},
+            "workload": {"type": "string"}
+          }
+        },
+        "cost_per_1k": {
+          "type": "object", "additionalProperties": false,
+          "required": ["label", "baseline_usd", "cache_usd", "routing_usd", "cache_and_routing_usd", "requests_per_run"],
+          "properties": {
+            "label": {"const": "modelled from list prices on a synthetic workload"},
+            "baseline_usd": {"type": "number", "minimum": 0},
+            "cache_usd": {"type": "number", "minimum": 0},
+            "routing_usd": {"type": "number", "minimum": 0},
+            "cache_and_routing_usd": {"type": "number", "minimum": 0},
+            "requests_per_run": {"type": "integer", "minimum": 1},
+            "workload": {"type": "string"}
+          }
+        },
+        "fallback": {
+          "type": "object", "additionalProperties": false,
+          "required": ["primary_killed_at_s", "requests_after_kill", "success_rate_after_kill", "added_latency_ms"],
+          "properties": {
+            "primary_killed_at_s": {"type": "number", "minimum": 0, "description": "seconds after the run started"},
+            "requests_after_kill": {"type": "integer", "minimum": 1},
+            "success_rate_after_kill": {"$ref": "#/$defs/fraction"},
+            "added_latency_ms": {"$ref": "#/$defs/percentiles"}
+          }
+        },
+        "rate_limit": {
+          "type": "object", "additionalProperties": false,
+          "required": ["over_limit_requests", "with_429_and_retry_after", "share_correct", "admitted_tokens_per_min", "limit_tokens_per_min"],
+          "properties": {
+            "over_limit_requests": {"type": "integer", "minimum": 0},
+            "with_429_and_retry_after": {"type": "integer", "minimum": 0},
+            "share_correct": {"$ref": "#/$defs/fraction"},
+            "admitted_tokens_per_min": {"type": "number", "minimum": 0},
+            "limit_tokens_per_min": {"type": "number", "minimum": 0}
+          }
+        },
+        "redis_down_from_start": {
+          "type": "object", "additionalProperties": false,
+          "required": ["refused", "blackholed"],
+          "properties": {
+            "refused": {"$ref": "#/$defs/added_latency"},
+            "blackholed": {"$ref": "#/$defs/added_latency"}
+          }
+        },
+        "open_streams": {
+          "type": "object", "additionalProperties": false,
+          "required": ["heap", "stream_seconds", "max_n_zero_errors", "runs"],
+          "properties": {
+            "heap": {"type": "string"},
+            "stream_seconds": {"type": "number", "exclusiveMinimum": 0},
+            "max_n_zero_errors": {"type": "integer", "minimum": 0},
+            "runs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/open_streams_run"}},
+            "headers_delayed": {
+              "type": "object", "additionalProperties": false,
+              "required": ["n", "errors", "fallback_success_rate", "peak_heap_used_mb", "peak_virtual_threads"],
+              "properties": {
+                "n": {"type": "integer", "minimum": 1},
+                "errors": {"type": "integer", "minimum": 0},
+                "fallback_success_rate": {"$ref": "#/$defs/fraction"},
+                "peak_heap_used_mb": {"type": "number", "minimum": 0},
+                "peak_virtual_threads": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        },
+        "log_insert": {
+          "type": "object", "additionalProperties": false,
+          "required": ["p50_ms", "p99_ms", "count"],
+          "properties": {
+            "p50_ms": {"type": "number", "minimum": 0},
+            "p99_ms": {"type": "number", "minimum": 0},
+            "count": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+    "percentiles": {
+      "type": "object", "additionalProperties": false,
+      "required": ["p50", "p95", "p99"],
+      "properties": {"p50": {"type": "number"}, "p95": {"type": "number"}, "p99": {"type": "number"}}
+    },
+    "latency_with_count": {
+      "type": "object", "additionalProperties": false,
+      "required": ["p50_ms", "p99_ms", "requests"],
+      "properties": {
+        "p50_ms": {"type": "number", "minimum": 0},
+        "p95_ms": {"type": "number", "minimum": 0},
+        "p99_ms": {"type": "number", "minimum": 0},
+        "requests": {"type": "integer", "minimum": 1}
+      }
+    },
+    "added_latency": {
+      "type": "object", "additionalProperties": false,
+      "required": ["added_ms", "requests", "errors"],
+      "properties": {
+        "added_ms": {"$ref": "#/$defs/percentiles"},
+        "requests": {"type": "integer", "minimum": 1},
+        "errors": {"type": "integer", "minimum": 0}
+      }
+    },
+    "overhead": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requests", "added_latency_seen_by_client_ms", "gateway_processing_overhead_ms"],
+      "properties": {
+        "requests": {"type": "integer", "minimum": 10000, "description": "AC-t08-5: at least 10,000"},
+        "arrival_rate_per_s": {"type": "number", "exclusiveMinimum": 0},
+        "added_latency_seen_by_client_ms": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ttfb", "total"],
+          "properties": {
+            "ttfb": {"$ref": "#/$defs/percentiles"},
+            "total": {"$ref": "#/$defs/percentiles"}
+          }
+        },
+        "gateway_processing_overhead_ms": {"$ref": "#/$defs/percentiles"}
+      }
+    },
+    "open_streams_run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["n", "errors", "peak_heap_used_mb", "peak_virtual_threads", "pinned_reports"],
+      "properties": {
+        "n": {"type": "integer", "minimum": 1},
+        "errors": {"type": "integer", "minimum": 0},
+        "peak_heap_used_mb": {"type": "number", "minimum": 0},
+        "peak_virtual_threads": {"type": "integer", "minimum": 0},
+        "pinned_reports": {"type": "integer", "minimum": 0, "description": "lines printed by -Djdk.tracePinnedThreads=short during the run"},
+        "pinned_top_frames": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

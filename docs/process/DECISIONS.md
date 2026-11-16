@@ -82,6 +82,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-43 | Output validation details (t07 prep) | validating terminal over the router; invalid = schema, truncated or refused; one retry; structural decorator per attempt |
 | D-44 | R6 review rulings | `default`/`explicit` route labels; no tenant on routing counter; empty answers billed with reported usage; no remote schema loading; buffer bounded by `max_tokens` |
 | D-45 | Benchmark method (t08 prep) | k6 image, open vs closed load per scenario, TTFB as time to first token, summary file contract, mandatory hardware label, README numbers checked against files |
+| D-46 | t08 review: skip window, load shedding, rulings | Redis skip window shared by limiter/budget/cache; per-instance in-flight limit with 503 `overloaded`; heap per stream; schema gaps deferred |
 
 ---
 
@@ -384,7 +385,7 @@ Base package `dev.raggateway`, by feature: `api` (HTTP edge, wire DTOs, client s
 - **Amended in the t02 review:**
   - *Client-side timeout, server-side run.* A Lua script that exceeds the 50 ms client timeout has still been sent; if Redis is only slow, it runs later. The request is then charged twice (Redis bucket and in-memory bucket): over-limiting, never under-limiting, and it refills. The mirror case, a refund that times out and is also applied locally, over-credits by at most that refund, capped at capacity. Accepted; making scripts idempotent per request id would add a key per request for a sub-second edge case.
   - *No reconciliation across a switch.* The Redis and in-memory buckets are independent; a reservation taken on one side and refunded on the other moves at most one reservation per in-flight request. Accepted.
-  - *Redis unreachable from start.* A refused connection fails at once (and `REJECT_COMMANDS` covers a dropped one), but a black-holed host costs up to the 500 ms connect timeout per Redis call. Not fixed now: t08 measures it (scenario 6b). If the added latency exceeds 50 ms per request, the fix is a short skip window (after a Redis failure, go straight to the fallback for ~1 s), recorded then.
+  - *Redis unreachable from start.* A refused connection fails at once (and `REJECT_COMMANDS` covers a dropped one), but a black-holed host costs up to the 500 ms connect timeout per Redis call. Not fixed now: t08 measures it (scenario 6b). If the added latency exceeds 50 ms per request, the fix is a short skip window (after a Redis failure, go straight to the fallback for ~1 s), recorded then. **Measured and fixed (D-46):** the t08 run showed requests waiting until k6's 60 s timeout with Redis black-holed and a 616 ms p95 with Redis refused; the skip window is now built.
 
 ### D-18. Embedder in this environment
 - **Decision:** a deterministic fake embedder (768 dims, derived from a hash of the text, L2-normalised) is the default under the `test` profile and selectable for local runs without Ollama (`gateway.rag.embedder=fake`); the Ollama embedder is the default otherwise. Every number produced with the fake is labelled "fake embedder, not a model".
@@ -651,4 +652,25 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - In this environment k6, the mocks and the gateway share 4 vCPUs. That inflates latency and caps throughput; the README says so next to the label.
   - Results answer "what does the gateway add on this machine", not "how does it behave against real providers" (the mock has fixed latency and never rate-limits).
   - The laptop run adds its own rows and replaces nothing.
+
+### D-46. t08 review: Redis skip window, load shedding, rulings
+- **Honesty check:** 12 README values were traced to the committed run file and to the raw k6 exports and Prometheus snapshots (scenario 1 request count, added time-to-first-byte and total p50/p95/p99, gateway overhead p50/p95/p99, log insert p50/p99/count, fallback kill time and 705/705, 1032/1032 correct 429s, cache-hit p99). The four cost rows were recomputed by hand from list prices and the workload. The derivations in `bench/lib/summary.py` are right: client-side added latency is a per-percentile difference of two runs (stated as such: it is not the percentile of per-request differences); server-side percentiles use Prometheus's `histogram_quantile` rule; cost per 1,000 is `SUM(cost_usd)` per tenant per run. `check_readme_numbers.py` matches all 64 values; the other numbers it lists are labels, codes and setup parameters.
+- **a. Redis skip window, built now.** Scenario 6b showed a black-holed Redis holding requests until k6's 60 s timeout (connection attempts queue behind each other) and a refused Redis adding 616 ms at p95. `RedisHealthGate` is shared by the limiter, the budget ledger and the cache. After any Redis failure it closes for `gateway.redis.skip-window` (1 s): all three fail open without touching Redis. Then exactly one request probes; a probe that never reports expires after one window. Lock-free, so no pinning. Skips are counted in `gateway.redis.skipped{component}`. The committed 6b rows describe the code before this; the README says so and gives no new figures until a run re-measures them.
+- **b. Heap per stream and load shedding.**
+  - *Evidence:* 4,000 concurrent streams exhausted the 512 MB heap, and the review reproduced it. A live-heap class histogram at about 1,000 streams showed ~230 MB live (~230 KB per stream): `byte[]` 105 MB, `char[]` 66 MB in ~8,400 arrays of ~8 KB (about 8 per stream), and virtual-thread stack chunks 37 MB (~9.5 KB each).
+  - *Leading hypothesis (not yet attributed by a heap dump):* buffers cached per thread by Jackson's default recycler pool (one set per virtual thread, since each request is a new virtual thread), Tomcat's per-connection buffers, the SDK/OkHttp stream buffers, and two virtual threads per Claude stream since D-37 c.
+  - *Fix now: load shedding.* `InFlightLimitFilter` admits at most `gateway.max-in-flight` (1,500) concurrent `/v1` requests per instance and answers the next with 503 `overloaded` and `Retry-After: 1`, before auth or any Redis or provider call. It exposes `gateway.requests.in_flight` and `gateway.requests.shed`. 1,500 is a configured limit derived from the run (2,000 completed at the heap limit), not a measurement; the laptop run re-measures it.
+  - *Deferred:* reducing the bytes per stream (shared Jackson recycler pool, one virtual thread per stream) needs an allocation profile first: a heap dump at N = 1,000 attributed by retained size, taken on the laptop run.
+  - The README states that one 512 MB instance does not hold the ~4K in flight of the design assumptions.
+- **c.** WORK_PLAN corrected: peak virtual threads come from thread dumps; `jvm_threads_live` counts platform threads only.
+- **d. Schema gaps** (per-scenario notes, "peak not sampled", timeout-capped flags): deferred. The run's `setup.notes` already records each of these in text, and the README explains them per scenario. If the laptop run needs them machine-readable, the schema grows optional fields then (additive, no version break).
+- **e.** Dev B's stricter rule, no laptop label even on "pending" rows: accepted. A laptop label must mean a laptop measurement.
+- **f.** The demo reads attempt counts from `request_log` because the mocks run without WireMock's request journal (it would grow without bound under load): accepted. The log is the gateway's own record and is what the README's other checks use.
+- **Harness fix:** `--allow-dirty` now always writes the summary to the gitignored `bench/results/`, also on a clean tree, so a probe can never land in `bench/summary/`.
+- **Gate 1 verdict (agent side): met.**
+  - t01–t08 are merged with green builds.
+  - The quickstart gives a streamed 200 against the mock profile (`quickstart_check.sh`).
+  - The scripted demo shows, in order: a 429 with `Retry-After`, a cache hit with its header, a fallback with the primary stopped, a schema-validated response, and the usage endpoint (`demo.sh`).
+  - The measured table holds container-labelled numbers for every t08 scenario, each traced to the committed run file.
+  - Owner part still open: laptop run and rows, Grafana screenshot, acceptance for t01–t08.
 

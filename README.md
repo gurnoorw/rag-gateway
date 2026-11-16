@@ -22,12 +22,12 @@ On every chat request the gateway:
 | Part | State |
 |---|---|
 | Gateway path (t01–t07): auth, rate limit, budget, cost log, fallback, metrics, cache, routing, output validation | Built and tested (JUnit 5 + Testcontainers, WireMock providers) |
-| Benchmarks (t08) | Harness built in this round; the measured table below fills from the committed run |
+| Benchmarks (t08) | k6 harness against WireMock mocks; one committed run on a cloud container (see [Measured](#measured)); laptop run pending |
 | RAG path (t09–t13): ingestion, hybrid retrieval, ACL filtering, evals | Not built yet |
 
 ## Quickstart
 
-Needs Docker and a JDK 21. This runs against WireMock mock providers (the `mock` compose profile and the `bench` Spring profile), so no API key is needed.
+Needs Docker and a JDK 21. This runs against WireMock mock providers (the `mock` compose profile starts `mock-claude` on port 8081 and `mock-ollama` on port 8082; the `bench` Spring profile points the providers at them), so no API key is needed.
 
 <!-- quickstart:begin -->
 ```bash
@@ -165,72 +165,94 @@ The binding constraints at that scale are concurrency and tokens, not request ra
 
 ## Measured
 
-Every value below is read from a committed run file, `bench/summary/<Run>.json`, at the key in the last column; `python3 scripts/check_readme_numbers.py` fails if any value, label or key disagrees. A row reading "pending" has no number yet.
+Every value below is read from a committed run file, `bench/summary/<Run>.json`, at the key in the last column; `python3 scripts/check_readme_numbers.py` fails if any value, label or key disagrees. Rows start with the scenario number (S1 to S8) used in the run file's setup notes and in [the work plan](docs/process/WORK_PLAN.md).
 
 How to read it:
 
-- **Hardware.** "cloud container, 4 vCPU / 15 GB" runs the gateway, the WireMock mocks and k6 on the same host, sharing its CPUs. That inflates latency and caps throughput, so these numbers say what the gateway adds on that machine, not how it behaves against real providers (the mocks have fixed latency and never rate-limit). Laptop runs are added as their own rows by the owner and replace nothing.
-- **Setup.** App with `-Xmx512m` and virtual threads; k6 `grafana/k6:2.3.0` with an open arrival-rate model for latency scenarios and a closed model for open streams (D-45).
-- **Percentiles.** "k6 client-side" percentiles are computed by k6 from every request. "bucket edges" percentiles come from a Prometheus histogram and are interpolated inside the bucket that holds them (D-38); the row lists the edges.
-- **Two overhead numbers (D-39).** "Added latency seen by the client" is gateway minus direct-to-mock at the same arrival rate (time to first byte and total). "Gateway processing overhead" excludes provider time and deliberate waits such as retry backoff. They answer different questions and are never merged.
-- **Cost** is modelled from list prices on a synthetic workload, not billed.
+- **Hardware.** "cloud container, 4 vCPU / 15 GB" ran the gateway, the WireMock mocks, Redis, Postgres and k6 on the same host, sharing its CPUs. That inflates latency and caps throughput, so these numbers say what the gateway adds on that machine, not how it behaves against real providers (the mocks have fixed latency and never rate-limit). Laptop runs are added as their own rows by the owner and replace nothing; none exists yet.
+- **Setup.** App with `-Xmx512m` and virtual threads; k6 `grafana/k6:2.3.0` with an open arrival-rate model for latency scenarios and a closed model for open streams (D-45). The mocks send the first chunk (holding the first token) after a fixed delay and the rest over about a second; the run file's `setup.mock_latency` has the exact shape.
+- **Percentiles.** "k6 client-side" percentiles are computed by k6 from every request. "bucket edges" percentiles come from a Prometheus histogram and are interpolated inside the bucket that holds them (D-38), so they are estimates; the row lists the edges.
+- **Added latencies are differences of percentiles**, not percentiles of differences: "p99 added" is the gateway leg's p99 minus the comparison leg's p99. Tails are noisy on a shared host, and the differences need not grow from p50 to p99.
 
 <!-- measured:begin -->
 | Metric | Value | Unit | Measured on | Run | Source key |
 |---|---|---|---|---|---|
-| Overhead: requests through the gateway | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.requests` |
-| Added latency seen by the client, time to first byte, p50 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p50` |
-| Added latency seen by the client, time to first byte, p95 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p95` |
-| Added latency seen by the client, time to first byte, p99 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p99` |
-| Added latency seen by the client, total time, p50 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.added_latency_seen_by_client_ms.total.p50` |
-| Added latency seen by the client, total time, p95 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.added_latency_seen_by_client_ms.total.p95` |
-| Added latency seen by the client, total time, p99 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.added_latency_seen_by_client_ms.total.p99` |
-| Gateway processing overhead p50 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.gateway_processing_overhead_ms.p50` |
-| Gateway processing overhead p95 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.gateway_processing_overhead_ms.p95` |
-| Gateway processing overhead p99 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.overhead.gateway_processing_overhead_ms.p99` |
-| Cache-hit latency p50 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_latency.p50_ms` |
-| Cache-hit latency p95 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_latency.p95_ms` |
-| Cache-hit latency p99 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_latency.p99_ms` |
-| Cache-hit latency: requests | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_latency.requests` |
-| Cache hit rate: configured repeat share of the workload | pending | % | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_rate.configured_repeat_share` |
-| Cache hit rate: measured | pending | % | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_rate.measured_hit_rate` |
-| Cache hit rate: requests | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.cache_hit_rate.requests` |
-| Cost per 1,000 requests, baseline: explicit strong model, no cache (modelled from list prices on a synthetic workload) | pending | USD | cloud container, 4 vCPU / 15 GB | | `scenarios.cost_per_1k.baseline_usd` |
-| Cost per 1,000 requests, cache only (modelled from list prices on a synthetic workload) | pending | USD | cloud container, 4 vCPU / 15 GB | | `scenarios.cost_per_1k.cache_usd` |
-| Cost per 1,000 requests, routing only (modelled from list prices on a synthetic workload) | pending | USD | cloud container, 4 vCPU / 15 GB | | `scenarios.cost_per_1k.routing_usd` |
-| Cost per 1,000 requests, cache and routing (modelled from list prices on a synthetic workload) | pending | USD | cloud container, 4 vCPU / 15 GB | | `scenarios.cost_per_1k.cache_and_routing_usd` |
-| Cost: requests per run | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.cost_per_1k.requests_per_run` |
-| Fallback: Claude mock killed at (seconds after the run started) | pending | s | cloud container, 4 vCPU / 15 GB | | `scenarios.fallback.primary_killed_at_s` |
-| Fallback: requests after the kill | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.fallback.requests_after_kill` |
-| Fallback: success rate after the kill | pending | % | cloud container, 4 vCPU / 15 GB | | `scenarios.fallback.success_rate_after_kill` |
-| Fallback: added latency after the kill, p50 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.fallback.added_latency_ms.p50` |
-| Fallback: added latency after the kill, p95 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.fallback.added_latency_ms.p95` |
-| Fallback: added latency after the kill, p99 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.fallback.added_latency_ms.p99` |
-| Rate limit: over-limit requests | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.rate_limit.over_limit_requests` |
-| Rate limit: over-limit requests answered 429 with `Retry-After` | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.rate_limit.with_429_and_retry_after` |
-| Rate limit: share answered correctly | pending | % | cloud container, 4 vCPU / 15 GB | | `scenarios.rate_limit.share_correct` |
-| Rate limit: admitted tokens per minute | pending | tokens/min | cloud container, 4 vCPU / 15 GB | | `scenarios.rate_limit.admitted_tokens_per_min` |
-| Rate limit: configured limit | pending | tokens/min | cloud container, 4 vCPU / 15 GB | | `scenarios.rate_limit.limit_tokens_per_min` |
-| Redis refused from start: added latency p50 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.refused.added_ms.p50` |
-| Redis refused from start: added latency p95 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.refused.added_ms.p95` |
-| Redis refused from start: added latency p99 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.refused.added_ms.p99` |
-| Redis refused from start: errors | pending | errors | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.refused.errors` |
-| Redis black-holed from start: added latency p50 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.blackholed.added_ms.p50` |
-| Redis black-holed from start: added latency p95 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.blackholed.added_ms.p95` |
-| Redis black-holed from start: added latency p99 (k6 client-side) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.blackholed.added_ms.p99` |
-| Redis black-holed from start: errors | pending | errors | cloud container, 4 vCPU / 15 GB | | `scenarios.redis_down_from_start.blackholed.errors` |
-| Open streams: largest N with zero errors | pending | streams | cloud container, 4 vCPU / 15 GB | | `scenarios.open_streams.max_n_zero_errors` |
-| Headers delayed past the first-token timeout: concurrent requests | pending | requests | cloud container, 4 vCPU / 15 GB | | `scenarios.open_streams.headers_delayed.n` |
-| Headers delayed: errors | pending | errors | cloud container, 4 vCPU / 15 GB | | `scenarios.open_streams.headers_delayed.errors` |
-| Headers delayed: fallback success rate | pending | % | cloud container, 4 vCPU / 15 GB | | `scenarios.open_streams.headers_delayed.fallback_success_rate` |
-| Headers delayed: peak heap used | pending | MB | cloud container, 4 vCPU / 15 GB | | `scenarios.open_streams.headers_delayed.peak_heap_used_mb` |
-| Headers delayed: peak virtual threads | pending | threads | cloud container, 4 vCPU / 15 GB | | `scenarios.open_streams.headers_delayed.peak_virtual_threads` |
-| Request-log insert p50 (`gateway_requestlog_write_seconds`, bucket edges 0.5, 1, 2, 5, 10, 25, 50, 100 ms) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.log_insert.p50_ms` |
-| Request-log insert p99 (`gateway_requestlog_write_seconds`, bucket edges 0.5, 1, 2, 5, 10, 25, 50, 100 ms) | pending | ms | cloud container, 4 vCPU / 15 GB | | `scenarios.log_insert.p99_ms` |
-| Request-log insert: inserts | pending | count | cloud container, 4 vCPU / 15 GB | | `scenarios.log_insert.count` |
+| S1 Overhead: requests through the gateway | 11,001 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.requests` |
+| S1 Added latency seen by the client, time to first byte, p50 (gateway minus direct, k6 client-side) | 1.7 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p50` |
+| S1 Added latency seen by the client, time to first byte, p95 (gateway minus direct, k6 client-side) | 3.5 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p95` |
+| S1 Added latency seen by the client, time to first byte, p99 (gateway minus direct, k6 client-side) | 5.2 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p99` |
+| S1 Added latency seen by the client, total time, p50 (gateway minus direct, k6 client-side) | 1.8 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.added_latency_seen_by_client_ms.total.p50` |
+| S1 Added latency seen by the client, total time, p95 (gateway minus direct, k6 client-side) | 3.9 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.added_latency_seen_by_client_ms.total.p95` |
+| S1 Added latency seen by the client, total time, p99 (gateway minus direct, k6 client-side) | 16.4 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.added_latency_seen_by_client_ms.total.p99` |
+| S1 Gateway processing overhead, p50 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | 1.7 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.gateway_processing_overhead_ms.p50` |
+| S1 Gateway processing overhead, p95 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | 4.5 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.gateway_processing_overhead_ms.p95` |
+| S1 Gateway processing overhead, p99 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | 6.1 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.overhead.gateway_processing_overhead_ms.p99` |
+| S8 Request-log insert, p50 (`gateway_requestlog_write_seconds`, bucket edges 0.5, 1, 2, 5, 10, 25, 50, 100 ms) | 0.8 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.log_insert.p50_ms` |
+| S8 Request-log insert, p99 (`gateway_requestlog_write_seconds`, bucket edges 0.5, 1, 2, 5, 10, 25, 50, 100 ms) | 4.0 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.log_insert.p99_ms` |
+| S8 Request-log inserts measured | 11,001 | count | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.log_insert.count` |
+| S2 Cache-hit latency, total time, p50 (k6 client-side) | 1.3 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_latency.p50_ms` |
+| S2 Cache-hit latency, total time, p95 (k6 client-side) | 1.9 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_latency.p95_ms` |
+| S2 Cache-hit latency, total time, p99 (k6 client-side) | 3.3 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_latency.p99_ms` |
+| S2 Cache-hit latency: requests | 2,000 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_latency.requests` |
+| S3 Cache hit rate: configured repeat share of the workload | 50.0 | % | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_rate.configured_repeat_share` |
+| S3 Cache hit rate: measured | 48.1 | % | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_rate.measured_hit_rate` |
+| S3 Cache hit rate: requests | 1,001 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cache_hit_rate.requests` |
+| S4 Cost per 1,000 requests, baseline: explicit strong model, no cache (modelled from list prices on a synthetic workload) | 7.7200 | USD | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cost_per_1k.baseline_usd` |
+| S4 Cost per 1,000 requests, cache only (modelled from list prices on a synthetic workload) | 4.0144 | USD | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cost_per_1k.cache_usd` |
+| S4 Cost per 1,000 requests, routing only (modelled from list prices on a synthetic workload) | 3.5080 | USD | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cost_per_1k.routing_usd` |
+| S4 Cost per 1,000 requests, cache and routing (modelled from list prices on a synthetic workload) | 1.8242 | USD | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cost_per_1k.cache_and_routing_usd` |
+| S4 Cost: requests per run | 1,000 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.cost_per_1k.requests_per_run` |
+| S5 Fallback: Claude mock killed at (seconds after the run started) | 24.8 | s | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.fallback.primary_killed_at_s` |
+| S5 Fallback: requests started after the kill | 705 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.fallback.requests_after_kill` |
+| S5 Fallback: success rate after the kill | 100.0 | % | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.fallback.success_rate_after_kill` |
+| S5 Fallback: added latency after the kill, p50 (successful after minus before, k6 client-side) | 2.0 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.fallback.added_latency_ms.p50` |
+| S5 Fallback: added latency after the kill, p95 (successful after minus before, k6 client-side) | 4.2 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.fallback.added_latency_ms.p95` |
+| S5 Fallback: added latency after the kill, p99 (successful after minus before, k6 client-side) | 15.7 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.fallback.added_latency_ms.p99` |
+| S6 Rate limit: over-limit requests | 1,032 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.rate_limit.over_limit_requests` |
+| S6 Rate limit: over-limit requests answered 429 with `Retry-After` | 1,032 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.rate_limit.with_429_and_retry_after` |
+| S6 Rate limit: share answered correctly | 100.0 | % | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.rate_limit.share_correct` |
+| S6 Rate limit: admitted tokens per minute (second minute of the run) | 19,950 | tokens/min | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.rate_limit.admitted_tokens_per_min` |
+| S6 Rate limit: configured limit | 20,000 | tokens/min | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.rate_limit.limit_tokens_per_min` |
+| S6b Redis refused from start: added latency, p50 (vs scenario 1, k6 client-side) | 0.8 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.refused.added_ms.p50` |
+| S6b Redis refused from start: added latency, p95 (vs scenario 1, k6 client-side) | 615.8 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.refused.added_ms.p95` |
+| S6b Redis refused from start: added latency, p99 (vs scenario 1, k6 client-side) | 935.5 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.refused.added_ms.p99` |
+| S6b Redis refused from start: requests | 2,986 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.refused.requests` |
+| S6b Redis refused from start: errors | 0 | errors | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.refused.errors` |
+| S6b Redis black-holed from start: added latency, p50 (vs scenario 1, k6 client-side; lower bound, capped by k6's request timeout) | 58696.4 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.blackholed.added_ms.p50` |
+| S6b Redis black-holed from start: added latency, p95 (vs scenario 1, k6 client-side; lower bound, capped by k6's request timeout) | 58691.6 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.blackholed.added_ms.p95` |
+| S6b Redis black-holed from start: added latency, p99 (vs scenario 1, k6 client-side; lower bound, capped by k6's request timeout) | 58675.4 | ms | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.blackholed.added_ms.p99` |
+| S6b Redis black-holed from start: requests | 1,657 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.blackholed.requests` |
+| S6b Redis black-holed from start: errors (not completed) | 1,386 | errors | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.redis_down_from_start.blackholed.errors` |
+| S7 Open streams: largest N with zero errors (`-Xmx512m`) | 2,000 | streams | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.max_n_zero_errors` |
+| S7 Open streams at N = 500: errors | 0 | errors | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=500].errors` |
+| S7 Open streams at N = 500: peak heap used | 293.9 | MB | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=500].peak_heap_used_mb` |
+| S7 Open streams at N = 500: peak virtual threads (thread dump every 2 s) | 760 | threads | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=500].peak_virtual_threads` |
+| S7 Open streams at N = 500: pinned-thread reports | 16 | count | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=500].pinned_reports` |
+| S7 Open streams at N = 1000: errors | 0 | errors | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=1000].errors` |
+| S7 Open streams at N = 1000: peak heap used | 510.0 | MB | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=1000].peak_heap_used_mb` |
+| S7 Open streams at N = 1000: peak virtual threads (thread dump every 2 s) | 1,382 | threads | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=1000].peak_virtual_threads` |
+| S7 Open streams at N = 1000: pinned-thread reports | 0 | count | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=1000].pinned_reports` |
+| S7 Open streams at N = 2000: errors | 0 | errors | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=2000].errors` |
+| S7 Open streams at N = 2000: peak heap used | 499.5 | MB | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=2000].peak_heap_used_mb` |
+| S7 Open streams at N = 2000: peak virtual threads (thread dump every 2 s) | 3,223 | threads | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=2000].peak_virtual_threads` |
+| S7 Open streams at N = 2000: pinned-thread reports | 0 | count | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.runs[n=2000].pinned_reports` |
+| S7b Headers delayed past the first-token timeout: concurrent requests | 1,000 | requests | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.n` |
+| S7b Headers delayed: errors | 0 | errors | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.errors` |
+| S7b Headers delayed: fallback success rate | 100.0 | % | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.fallback_success_rate` |
+| S7b Headers delayed: peak heap used | 484.4 | MB | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.peak_heap_used_mb` |
+| S7b Headers delayed: peak virtual threads (thread dump every 2 s) | 2,004 | threads | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.peak_virtual_threads` |
 <!-- measured:end -->
 
-Per-N open-stream rows (errors, peak heap, peak virtual threads, pinned-thread reports at each N) are added from the run with keys such as `scenarios.open_streams.runs[n=1000].errors`.
+Notes on the rows:
+
+- **S1 and S8, overhead.** Two numbers, never merged (D-39, D-45). *Added latency seen by the client* is k6's time to first byte (`http_req_waiting`, which is the first token here) and total time through the gateway, minus the same against the mock directly at the same arrival rate. *Gateway processing overhead* is the gateway's own work measured inside the process (`gateway_overhead_seconds`, excluding provider time and deliberate waits such as retry backoff); its percentiles are interpolated within the listed bucket edges, so a p99 between two edges is only known to lie in that bucket. A gateway warm-up ran first and is not reported. The request-log insert (S8) is timed over the same gateway leg and happens after the response is closed (C7), so it is not in the client's latency.
+- **S2 and S3, cache.** Hit latency is the total time of responses marked `X-Gateway-Cache: HIT`, after the prompt pool was warmed. The measured hit rate is below the configured repeat share because each pool prompt's first occurrence is a miss.
+- **S4, cost.** Modelled from list prices dated 2026-11-16 (`setup.price_date`) on a synthetic workload: `SUM(request_log.cost_usd)` per run, one fresh tenant per run. Not a bill. The workload (prompt mix, output length, which models) is in the run file under `scenarios.cost_per_1k.workload`.
+- **S5, fallback.** The Claude mock was killed with SIGKILL mid-run. Requests are classed by start time; the requests in flight at the moment of the kill failed and are not in the after-kill count. Every successful after-kill request was served by Ollama.
+- **S6, rate limit.** One tenant driven above its tokens-per-minute limit. Admitted tokens per minute are counted over the second minute only, because the bucket starts full and the first minute also admits the initial capacity.
+- **S6b, Redis unavailable from the start** (decides the D-17 skip window). *Refused*: the median adds little, but p95 and p99 are much higher than p50. *Black-holed* (connections time out with no answer): most requests never completed, they ended at k6's request timeout, so the added-latency values are **lower bounds** capped by that timeout, and k6 could not hold the arrival rate (it dropped scheduled arrivals for lack of free virtual users). The black-holed rows show that a black-holed Redis makes the gateway unusable without the skip window D-17 describes.
+- **S7, open streams.** Closed model: N virtual users each holding one ~5 s stream at a time, app at `-Xmx512m`. The largest step with zero errors is the one in the table; the next step (twice as many streams) ran out of heap (`OutOfMemoryError`), every stream in it failed, and its heap and thread peaks could not be sampled, so it has no rows. From N = 1000 up the peak heap sits close to the 512 MB limit, so heap, not threads, is what bounds this step size. Peak heap is sampled every 0.5 s; peak virtual threads come from a thread dump every 2 s (`jvm_threads_live` counts platform threads only), so short peaks between dumps are missed. Pinning reports (`-Djdk.tracePinnedThreads=short`) appeared only right after startup, all in a lazy initializer inside the provider SDK (`kotlin.SynchronizedLazyImpl.getValue`), not in steady-state streaming.
+- **S7b, headers delayed.** The Claude mock holds its response headers past the first-token timeout; every request was answered by the Ollama fallback, and the abandoned Claude calls (D-37 c) stayed within the heap at this N.
 
 ## Trade-offs
 
@@ -265,7 +287,7 @@ bash bench/run-all.sh --measured-on "<hardware label>"                  # all sc
 python3 scripts/check_readme_numbers.py                                 # README measured table == run files
 bash scripts/quickstart_check.sh && bash scripts/check_mermaid.sh        # clean clone; needs the default ports free
 bash scripts/demo.sh                                                    # with the mock stack and the app running
-python3 -B -m unittest discover -s scripts/tests -v                     # tests of the checks themselves
+python3 -m unittest discover -s scripts/tests -v                        # tests of the checks themselves
 ```
 
 `--measured-on` is required and has no default, so a run cannot be mislabelled. Raw k6 output stays in the gitignored `bench/results/`; the summary file is committed. The observability stack (`docker compose --profile obs up -d`) adds Prometheus and Grafana with the dashboard in `ops/grafana/dashboards/`.

@@ -1,6 +1,6 @@
 """Tests for scripts/check_readme_numbers.py (t08, AC-t08-2, -3, -4).
 
-Run: python3 -B -m unittest discover -s scripts/tests -v
+Run: python3 -m unittest discover -s scripts/tests -v
 
 Fixtures under scripts/tests/fixtures/ are test data, not a measurement: the summary file says so in
 ``measured_on`` and no value in it was produced by a benchmark.

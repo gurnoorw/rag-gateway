@@ -1,7 +1,7 @@
 """Tests for scripts/check_mermaid.sh (t08, AC-t08-8). Needs Docker and the pinned mermaid-cli image;
 skipped (not passed) when the script reports that the check could not run (exit 2).
 
-Run: python3 -B -m unittest discover -s scripts/tests -v
+Run: python3 -m unittest discover -s scripts/tests -v
 """
 import pathlib
 import subprocess

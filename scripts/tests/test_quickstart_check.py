@@ -2,7 +2,7 @@
 
 The full quickstart run needs the mock compose profile, port 8080 and a JDK; it is not run here.
 
-Run: python3 -B -m unittest discover -s scripts/tests -v
+Run: python3 -m unittest discover -s scripts/tests -v
 """
 import pathlib
 import subprocess

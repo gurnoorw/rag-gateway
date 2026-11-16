@@ -90,7 +90,9 @@ class CoreConfigIT extends AbstractIntegrationTest {
         assertThat(ctx.errorCode()).isEqualTo(ErrorCode.PROVIDER_ERROR);
         assertThat(ctx.attempts()).singleElement()
                 .satisfies(a -> assertThat(a.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN));
-        Map<String, Object> row = jdbc.sql("SELECT * FROM request_log").query().singleRow();
+        // Scoped to this request's id (TEAM_RULES): rows of other tests may still be arriving.
+        Map<String, Object> row = jdbc.sql("SELECT * FROM request_log WHERE request_id = ?")
+                .param(UUID.fromString(ctx.requestId())).query().singleRow();
         assertThat(row).containsEntry("request_id", UUID.fromString(ctx.requestId()))
                 .containsEntry("tenant_id", "acme")
                 .containsEntry("provider_used", "claude")

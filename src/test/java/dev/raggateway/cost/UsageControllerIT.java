@@ -203,8 +203,10 @@ class UsageControllerIT extends AbstractIntegrationTest {
                 HttpResponse.BodyHandlers.ofString());
     }
 
-    long logRows(String tenant) {
-        return jdbc.sql("SELECT count(*) FROM request_log WHERE tenant_id = :t").param("t", tenant).query(Long.class).single();
+    /** The log row of one request, by the id from its {@code X-Request-Id} header (TEAM_RULES). */
+    java.util.Optional<Map<String, Object>> ownRow(UUID requestId) {
+        return jdbc.sql("SELECT * FROM request_log WHERE request_id = ?").param(requestId).query().listOfRows()
+                .stream().findFirst();
     }
 
     @Test
@@ -217,8 +219,9 @@ class UsageControllerIT extends AbstractIntegrationTest {
 
         assertThat(response.statusCode()).isEqualTo(400);
         assertThat(JSON.readTree(response.body()).at("/error/code").asText()).isEqualTo("invalid_request");
-        await().atMost(Duration.ofSeconds(5)).until(() -> logRows("tiny") == 1);
-        Map<String, Object> row = jdbc.sql("SELECT * FROM request_log WHERE tenant_id = 'tiny'").query().singleRow();
+        UUID requestId = UUID.fromString(response.headers().firstValue("X-Request-Id").orElseThrow());
+        await().atMost(Duration.ofSeconds(5)).until(() -> ownRow(requestId).isPresent());
+        Map<String, Object> row = ownRow(requestId).orElseThrow();
         assertThat(row).containsEntry("status", "error").containsEntry("error_code", "invalid_request")
                 .containsEntry("input_tokens", 0).containsEntry("output_tokens", 0);
         assertThat(((Number) row.get("attempts")).intValue()).isZero();
@@ -235,9 +238,9 @@ class UsageControllerIT extends AbstractIntegrationTest {
         HttpResponse<String> response = chat(KEY_A, 600);
 
         assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
-        await().atMost(Duration.ofSeconds(5)).until(() -> logRows("tenant-a") == 1);
-        BigDecimal logged = jdbc.sql("SELECT cost_usd FROM request_log WHERE tenant_id = 'tenant-a'")
-                .query(BigDecimal.class).single();
+        UUID requestId = UUID.fromString(response.headers().firstValue("X-Request-Id").orElseThrow());
+        await().atMost(Duration.ofSeconds(5)).until(() -> ownRow(requestId).isPresent());
+        BigDecimal logged = (BigDecimal) ownRow(requestId).orElseThrow().get("cost_usd");
         // haiku: 1,234 x $0.10 + 567 x $0.50 per Mtok = 406.9 micro-USD -> 407
         assertThat(logged).isEqualByComparingTo("0.000407");
         String budget = redis.opsForValue().get(RedisBudgetLedger.key("tenant-a", YearMonth.now(ZoneOffset.UTC)));

@@ -103,9 +103,12 @@ class ChatCompletionsCancelE2EIT extends AbstractIntegrationTest {
         assertThat(Duration.ofNanos(upstreamClosedAt - clientClosedAt)).isLessThan(Duration.ofSeconds(2));
         assertThat(CLAUDE.framesWritten()).as("upstream was cut off early").isLessThan(FRAMES.size());
 
-        await().atMost(Duration.ofSeconds(5)).until(() ->
-                jdbc.sql("SELECT count(*) FROM request_log").query(Long.class).single() >= 1);
-        List<Map<String, Object>> rows = jdbc.sql("SELECT * FROM request_log").query().listOfRows();
+        // Scoped to this request's id: a slow row from an earlier test may land after the cleanup (TEAM_RULES).
+        UUID ownId = UUID.fromString(requestId);
+        await().atMost(Duration.ofSeconds(5)).until(() -> jdbc.sql("SELECT count(*) FROM request_log WHERE request_id = ?")
+                .param(ownId).query(Long.class).single() >= 1);
+        List<Map<String, Object>> rows = jdbc.sql("SELECT * FROM request_log WHERE request_id = ?").param(ownId)
+                .query().listOfRows();
         assertThat(rows).hasSize(1);
         Map<String, Object> row = rows.get(0);
         assertThat(row).containsEntry("status", "client_cancelled")

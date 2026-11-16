@@ -135,9 +135,12 @@ class RateLimitE2EIT extends AbstractIntegrationTest {
         // the bucket was never touched
         assertThat(redis.hasKey("rl:{acme}")).isFalse();
         // and the rejection has its log row
-        await().atMost(Duration.ofSeconds(5)).until(() ->
-                jdbc.sql("SELECT count(*) FROM request_log").query(Long.class).single() == 1);
-        Map<String, Object> row = jdbc.sql("SELECT * FROM request_log").query().singleRow();
+        // Scoped to this request's id: a slow row from an earlier test may land after the cleanup (TEAM_RULES).
+        UUID requestId = UUID.fromString(response.headers().firstValue("X-Request-Id").orElseThrow());
+        await().atMost(Duration.ofSeconds(5)).until(() -> jdbc.sql("SELECT count(*) FROM request_log WHERE request_id = ?")
+                .param(requestId).query(Long.class).single() == 1);
+        Map<String, Object> row = jdbc.sql("SELECT * FROM request_log WHERE request_id = ?").param(requestId)
+                .query().singleRow();
         assertThat(row).containsEntry("error_code", "budget_exceeded").containsEntry("input_tokens", 0);
         assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(429);
     }

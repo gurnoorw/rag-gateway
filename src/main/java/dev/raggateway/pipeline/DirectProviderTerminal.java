@@ -114,34 +114,11 @@ public final class DirectProviderTerminal implements Terminal {
     private Attempt attempt(LlmProvider provider, ChatRequest request, AttemptOutcome outcome, AttemptSink observer,
                             long start, String errorKind) {
         long now = nanoClock.getAsLong();
-        Usage usage;
-        boolean estimated;
-        if (observer.completion != null) {
-            // The provider reported usage before the failure (e.g. the final write to the client failed).
-            usage = observer.completion.usage();
-            estimated = false;
-        } else if (outcome == AttemptOutcome.SUCCEEDED || billedNothing(outcome, errorKind)) {
-            usage = Usage.ZERO;
-            estimated = false;
-        } else {
-            usage = new Usage(estimator.estimateInput(request), estimator.estimate(observer.text.toString()));
-            estimated = true;
-        }
+        AttemptUsage billed = AttemptUsage.of(outcome, errorKind, observer.completion, request,
+                observer.text.toString(), estimator);
         long firstToken = observer.firstTokenNanos < 0 ? -1 : observer.firstTokenNanos - start;
-        return new Attempt(provider.name(), request.model(), false, outcome, usage, estimated, now - start,
+        return new Attempt(provider.name(), request.model(), false, outcome, billed.usage(), billed.estimated(), now - start,
                 firstToken, errorKind);
-    }
-
-    /**
-     * True for a provider that answered with an HTTP error status before any token: it returned an error
-     * instead of generating, and providers do not bill error responses, so the attempt costs nothing and the
-     * whole reservation goes back (DECISIONS.md D-34, AC-t02-5). A timeout or a broken connection before the
-     * first token is different: the provider may already have processed the prompt, so the input estimate
-     * is still charged and flagged as estimated.
-     */
-    static boolean billedNothing(AttemptOutcome outcome, String errorKind) {
-        return outcome == AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN
-                && ProviderException.Kind.HTTP_STATUS.name().equals(errorKind);
     }
 
     /** Observes one attempt: streamed text (for estimated usage), first-token time, completion. */

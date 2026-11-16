@@ -9,7 +9,11 @@ import dev.raggateway.core.RequestContext;
  *
  * <p>Contract:
  * <ul>
- *   <li>records every provider attempt with {@link RequestContext#recordAttempt};</li>
+ *   <li>calls {@link RequestContext#startAttempt} immediately before every adapter call, including retries
+ *       and fallbacks, so the response headers committed at the first byte name the provider streaming (D-28);</li>
+ *   <li>records every provider attempt with {@link RequestContext#recordAttempt}, its usage from
+ *       {@link AttemptUsage#of} (one billing rule for every terminal, D-34) and {@code fallback} set when the
+ *       provider is not the one model selection chose (C21);</li>
  *   <li>emits exactly one terminal event on {@code sink} (complete, or error as a
  *       {@link dev.raggateway.error.GatewayException}) and does not throw it;</li>
  *   <li>lets {@link ClientDisconnectedException} propagate after recording a

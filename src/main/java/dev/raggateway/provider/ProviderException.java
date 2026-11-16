@@ -54,4 +54,14 @@ public final class ProviderException extends Exception {
     public Optional<Duration> retryAfter() {
         return Optional.ofNullable(retryAfter);
     }
+
+    /**
+     * Whether the router may move on to the next provider in the chain (t03, DECISIONS.md D-30): every
+     * retryable failure, plus an upstream 401 or 403, which means this provider's credential is missing or
+     * lacks access. That is not retried on the same provider (it would fail the same way) but another
+     * provider can still answer. Any other 4xx means the request itself is invalid: no fallback (AC-t03-6).
+     */
+    public boolean fallbackAllowed() {
+        return retryable || httpStatus == 401 || httpStatus == 403;
+    }
 }

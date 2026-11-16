@@ -4,6 +4,7 @@ import dev.raggateway.auth.ApiKeyAuthenticator;
 import dev.raggateway.auth.JdbcApiKeyAuthenticator;
 import dev.raggateway.core.CharRatioTokenEstimator;
 import dev.raggateway.core.TokenEstimator;
+import dev.raggateway.cost.CostCalculator;
 import dev.raggateway.cost.RequestLogWriter;
 import dev.raggateway.pipeline.DefaultGatewayPipeline;
 import dev.raggateway.pipeline.DirectProviderTerminal;
@@ -36,8 +37,8 @@ public class CoreConfig {
     }
 
     @Bean
-    RequestLogWriter requestLogWriter(JdbcClient jdbc, MeterRegistry registry) {
-        return new RequestLogWriter(jdbc, registry);
+    RequestLogWriter requestLogWriter(JdbcClient jdbc, MeterRegistry registry, CostCalculator costs) {
+        return new RequestLogWriter(jdbc, registry, costs);
     }
 
     /** t01 terminal: one provider, one attempt. t03 replaces it with the fallback router. */

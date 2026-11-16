@@ -40,6 +40,9 @@ import static org.mockito.Mockito.when;
 class RequestLogWriterTest extends AbstractPostgresTest {
 
     private static final long MS = 1_000_000L;
+    private static final CostCalculator COSTS = new CostCalculator(new PriceTable(Map.of(
+            "claude-opus-5-5", new PriceTable.Price(new BigDecimal("4.00"), new BigDecimal("20.00")),
+            "claude-haiku-5-5", new PriceTable.Price(new BigDecimal("0.10"), new BigDecimal("0.50")))));
 
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private String tenantId;
@@ -74,7 +77,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
         ctx.markFirstTokenSent(1_100 * MS);
         ctx.setCacheStatus(CacheStatus.MISS);
         ctx.finish(RequestOutcome.SUCCESS, null, 200, 1_450 * MS);
-        var writer = new RequestLogWriter(jdbc, registry, () -> 1_450 * MS);
+        var writer = new RequestLogWriter(jdbc, registry, COSTS, () -> 1_450 * MS);
 
         writer.onRequestFinished(ctx);
 
@@ -97,7 +100,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
                 .containsEntry("error_code", null);
         assertThat(((Number) row.get("attempts")).intValue()).isEqualTo(1);
         assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(200);
-        assertThat((BigDecimal) row.get("cost_usd")).isEqualByComparingTo("0");
+        assertThat((BigDecimal) row.get("cost_usd")).isEqualByComparingTo("0.000728"); // 12 x $4 + 34 x $20 per Mtok
         assertThat(registry.timer(MetricNames.REQUEST_LOG_WRITE).count()).isEqualTo(1);
         assertThat(registry.counter(MetricNames.REQUEST_LOG_WRITE_FAILURES).count()).isZero();
     }
@@ -110,7 +113,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
                 new Usage(5, 5), false, MS, MS, null));
         ctx.finish(RequestOutcome.SUCCESS, null, 200);
 
-        new RequestLogWriter(jdbc, registry).onRequestFinished(ctx);
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
 
         Map<String, Object> row = row(ctx.requestId());
         assertThat(row.values()).noneMatch(v -> v != null && v.toString().contains(marker));
@@ -124,7 +127,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
         ctx.markFirstTokenSent(1_010 * MS);
         ctx.finish(RequestOutcome.CLIENT_CANCELLED, null, 200);
 
-        new RequestLogWriter(jdbc, registry).onRequestFinished(ctx);
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
 
         assertThat(row(ctx.requestId())).containsEntry("status", "client_cancelled")
                 .containsEntry("usage_estimated", true)
@@ -137,7 +140,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
         RequestContext ctx = ctx("hi", false);
         ctx.finish(RequestOutcome.ERROR, ErrorCode.INVALID_REQUEST, 400);
 
-        new RequestLogWriter(jdbc, registry).onRequestFinished(ctx);
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
 
         Map<String, Object> row = row(ctx.requestId());
         assertThat(row).containsEntry("status", "error")
@@ -156,7 +159,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
         ctx.setCacheStatus(CacheStatus.HIT);
         ctx.finish(RequestOutcome.SUCCESS, null, 200);
 
-        new RequestLogWriter(jdbc, registry).onRequestFinished(ctx);
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
 
         assertThat(row(ctx.requestId())).containsEntry("provider_used", "cache")
                 .containsEntry("model_used", "claude-opus-5-5")
@@ -167,7 +170,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
     void failedInsertIsCountedLoggedAndNeverThrown(CapturedOutput output) throws SQLException {
         DataSource broken = mock(DataSource.class);
         when(broken.getConnection()).thenThrow(new SQLException("connection refused"));
-        var writer = new RequestLogWriter(JdbcClient.create(broken), registry);
+        var writer = new RequestLogWriter(JdbcClient.create(broken), registry, COSTS);
         String marker = "prompt-marker-" + UUID.randomUUID();
         RequestContext ctx = ctx(marker, true);
         ctx.recordAttempt(new Attempt("claude", "claude-opus-5-5", false, AttemptOutcome.SUCCEEDED,
@@ -185,5 +188,56 @@ class RequestLogWriterTest extends AbstractPostgresTest {
                 .contains("output_tokens=34")
                 .contains("status=ok")
                 .doesNotContain(marker);
+    }
+
+    // ---- t02: cost ----
+
+    @Test
+    void ac_t02_10_costEqualsInputTimesPriceInPlusOutputTimesPriceOutToSixDecimals() {
+        RequestContext ctx = ctx("hi", false);
+        ctx.recordAttempt(new Attempt("claude", "claude-haiku-5-5", false, AttemptOutcome.SUCCEEDED,
+                new Usage(1_234, 567), false, MS, MS, null));
+        ctx.finish(RequestOutcome.SUCCESS, null, 200);
+
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
+
+        BigDecimal expected = new BigDecimal("1234").multiply(new BigDecimal("0.10"))
+                .add(new BigDecimal("567").multiply(new BigDecimal("0.50")))
+                .movePointLeft(6).setScale(6, java.math.RoundingMode.HALF_UP); // 0.0004069 -> 0.000407
+        BigDecimal logged = (BigDecimal) row(ctx.requestId()).get("cost_usd");
+        assertThat(logged).isEqualByComparingTo(expected).isEqualByComparingTo("0.000407");
+        assertThat(logged).isEqualByComparingTo(COSTS.costUsd(ctx.attempts()));
+    }
+
+    @Test
+    void costSumsEveryAttemptEachPricedByItsOwnModel() {
+        RequestContext ctx = ctx("hi", false);
+        ctx.recordAttempt(new Attempt("claude", "claude-opus-5-5", false, AttemptOutcome.FAILED_MID_STREAM,
+                new Usage(100, 10), true, MS, MS, "CONNECTION"));
+        ctx.recordAttempt(new Attempt("claude", "claude-haiku-5-5", true, AttemptOutcome.SUCCEEDED,
+                new Usage(100, 50), false, MS, MS, null));
+        ctx.finish(RequestOutcome.SUCCESS, null, 200);
+
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
+
+        // opus 100 x 4 + 10 x 20 = 600; haiku 100 x 0.10 + 50 x 0.50 = 35; total 635 micro-USD
+        assertThat((BigDecimal) row(ctx.requestId()).get("cost_usd")).isEqualByComparingTo("0.000635");
+    }
+
+    @Test
+    void rejectedRequestIsLoggedWithZeroTokensAndZeroCost() {
+        RequestContext ctx = ctx("hi", false);
+        ctx.finish(RequestOutcome.ERROR, ErrorCode.RATE_LIMITED, 429);
+
+        new RequestLogWriter(jdbc, registry, COSTS).onRequestFinished(ctx);
+
+        Map<String, Object> row = row(ctx.requestId());
+        assertThat(row).containsEntry("status", "error")
+                .containsEntry("error_code", "rate_limited")
+                .containsEntry("input_tokens", 0)
+                .containsEntry("output_tokens", 0);
+        assertThat((BigDecimal) row.get("cost_usd")).isEqualByComparingTo("0");
+        assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(429);
+        assertThat(((Number) row.get("attempts")).intValue()).isZero();
     }
 }

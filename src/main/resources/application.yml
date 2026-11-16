@@ -71,6 +71,10 @@ gateway:
       upstream-id: "llama3.2:1b"
       input-usd-per-mtok: 0
       output-usd-per-mtok: 0
+  # Token bucket per tenant (t02): capacity = the tenant's tokens_per_minute; an empty bucket refills in
+  # refill-period (1m keeps the long-run rate at exactly TPM). Budget and bucket state live in Redis.
+  rate-limit:
+    refill-period: 1m
   # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
   # tools on the same machine, which could silently point the gateway at another host or account.
   providers:

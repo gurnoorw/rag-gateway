@@ -30,7 +30,9 @@ import java.util.function.LongSupplier;
  * held except text, so the row can be rebuilt from logs. The insert time is the
  * {@code gateway.requestlog.write} timer.
  *
- * <p>{@code cost_usd} is written as 0 until the price table arrives (t02).
+ * <p>{@code cost_usd} is {@link CostCalculator#costUsd} over every attempt: the same micro-USD amount the
+ * rate-limit filter added to the tenant's monthly budget (DECISIONS.md D-33). A request with no attempt
+ * (rejected by a filter, cache hit) costs 0.
  */
 public final class RequestLogWriter implements RequestCompletionListener {
 
@@ -49,16 +51,18 @@ public final class RequestLogWriter implements RequestCompletionListener {
             """;
 
     private final JdbcClient jdbc;
+    private final CostCalculator costs;
     private final Timer writeTimer;
     private final Counter writeFailures;
     private final LongSupplier nanoClock;
 
-    public RequestLogWriter(JdbcClient jdbc, MeterRegistry registry) {
-        this(jdbc, registry, System::nanoTime);
+    public RequestLogWriter(JdbcClient jdbc, MeterRegistry registry, CostCalculator costs) {
+        this(jdbc, registry, costs, System::nanoTime);
     }
 
-    RequestLogWriter(JdbcClient jdbc, MeterRegistry registry, LongSupplier nanoClock) {
+    RequestLogWriter(JdbcClient jdbc, MeterRegistry registry, CostCalculator costs, LongSupplier nanoClock) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
+        this.costs = Objects.requireNonNull(costs, "costs");
         this.nanoClock = Objects.requireNonNull(nanoClock, "nanoClock");
         this.writeTimer = Timer.builder(MetricNames.REQUEST_LOG_WRITE)
                 .description("Request-log insert time")
@@ -73,7 +77,8 @@ public final class RequestLogWriter implements RequestCompletionListener {
         Row row;
         try {
             // Latency ends when the pipeline finished the request, not when this listener runs (D-31).
-            row = Row.of(ctx, ctx.finishNanos() >= 0 ? ctx.finishNanos() : nanoClock.getAsLong());
+            row = Row.of(ctx, ctx.finishNanos() >= 0 ? ctx.finishNanos() : nanoClock.getAsLong(),
+                    costs.costUsd(ctx.attempts()));
         } catch (RuntimeException e) {
             writeFailures.increment();
             log.warn("request log row not built for request {}: {}", ctx.requestId(), e.toString());
@@ -121,7 +126,7 @@ public final class RequestLogWriter implements RequestCompletionListener {
                boolean usageEstimated, BigDecimal costUsd, int latencyMs, Integer ttftMs, boolean stream,
                String cacheStatus, String status, String errorCode, int httpStatus) {
 
-        static Row of(RequestContext ctx, long nowNanos) {
+        static Row of(RequestContext ctx, long nowNanos, BigDecimal costUsd) {
             Attempt serving = ctx.servingAttempt().orElse(null);
             boolean hit = ctx.cacheStatus() == CacheStatus.HIT;
             String modelUsed = serving != null ? serving.model() : hit ? ctx.request().model() : null;
@@ -132,7 +137,7 @@ public final class RequestLogWriter implements RequestCompletionListener {
             String status = ctx.outcome() == null ? "error" : ctx.outcome().logValue();
             return new Row(UUID.fromString(ctx.requestId()), ctx.tenant().id(), uuidOrNull(ctx.caller().keyId()),
                     ctx.requestedModel(), modelUsed, providerUsed, ctx.routeRule(), ctx.fallbackUsed(),
-                    ctx.attempts().size(), ctx.billedUsage(), estimated, BigDecimal.ZERO, latencyMs, ttftMs,
+                    ctx.attempts().size(), ctx.billedUsage(), estimated, costUsd, latencyMs, ttftMs,
                     ctx.request().stream(), ctx.cacheStatus().name().toLowerCase(Locale.ROOT), status,
                     ctx.errorCode() == null ? null : ctx.errorCode().code(), ctx.httpStatus());
         }

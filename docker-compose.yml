@@ -1,0 +1,73 @@
+# Local stack (CLAUDE.md overrides, DECISIONS.md D-20).
+#   docker compose up -d                 -> postgres + redis only (8 GB laptop default)
+#   docker compose --profile obs up -d   -> + prometheus + grafana (t04, t08)
+# The app itself runs from the IDE or ./gradlew bootRun with -Xmx512m.
+# Image tags are pinned; tests use the same tags (src/test/java/dev/raggateway/support/TestImages.java).
+name: rag-gateway
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-raggateway}
+      POSTGRES_USER: ${POSTGRES_USER:-raggateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-raggateway}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-raggateway} -d ${POSTGRES_DB:-raggateway}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7.4.12-alpine
+    # AOF keeps the monthly budget counters across restarts. volatile-lru evicts only keys with a TTL
+    # (cache entries, idle rate-limit buckets), never the budget counters, which have none (D-17).
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec",
+              "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    mem_limit: 192m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:v3.15.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=2d"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # the app runs on the host, not in compose
+    mem_limit: 256m
+
+  grafana:
+    profiles: ["obs"]
+    image: grafana/grafana:13.0.13
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    mem_limit: 256m
+
+volumes:
+  pgdata:
+  redisdata:

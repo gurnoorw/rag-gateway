@@ -1,0 +1,7 @@
+# Owned by t04. Dashboard JSON files go in ops/grafana/dashboards/.
+apiVersion: 1
+providers:
+  - name: rag-gateway
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

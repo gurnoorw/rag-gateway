@@ -18,7 +18,9 @@ public enum ErrorCode {
     INTERNAL_ERROR(500, "api_error"),
     PROVIDER_ERROR(502, "api_error"),
     INVALID_MODEL_OUTPUT(502, "api_error"),
-    ALL_PROVIDERS_FAILED(503, "api_error");
+    ALL_PROVIDERS_FAILED(503, "api_error"),
+    /** This instance is at its in-flight request limit (load shedding, D-46); retry shortly or on another instance. */
+    OVERLOADED(503, "api_error");
 
     private final int httpStatus;
     private final String type;

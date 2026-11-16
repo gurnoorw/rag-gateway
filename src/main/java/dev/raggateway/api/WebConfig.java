@@ -2,6 +2,9 @@ package dev.raggateway.api;
 
 import dev.raggateway.auth.ApiKeyAuthInterceptor;
 import dev.raggateway.auth.CallerArgumentResolver;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -29,6 +32,20 @@ public class WebConfig implements WebMvcConfigurer {
         var registration = new FilterRegistrationBean<>(new RequestIdFilter());
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
         registration.addUrlPatterns("/*");
+        return registration;
+    }
+
+    /**
+     * Load shedding (D-46), right after the request id so a 503 carries it, before authentication.
+     *
+     * @param maxInFlight {@code gateway.max-in-flight}: concurrent {@code /v1} requests per instance; 0 disables it
+     */
+    @Bean
+    FilterRegistrationBean<InFlightLimitFilter> inFlightLimitFilter(
+            @Value("${gateway.max-in-flight:1500}") int maxInFlight, MeterRegistry registry, ObjectMapper json) {
+        var registration = new FilterRegistrationBean<>(new InFlightLimitFilter(maxInFlight, registry, json));
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 1);
+        registration.addUrlPatterns("/v1/*");
         return registration;
     }
 

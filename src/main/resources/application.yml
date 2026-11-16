@@ -45,6 +45,12 @@ logging:
     level: "%5p [%X{requestId:-}]"   # request id on every log line (G8)
 
 gateway:
+  # Load shedding (D-46): concurrent /v1 requests per instance before 503 overloaded. Measured on -Xmx512m in the
+  # t08 run (2,000 streams completed at the heap limit, 4,000 ran out of heap); scale with -Xmx and re-measure.
+  max-in-flight: 1500
+  # Redis skip window (D-46): after a Redis failure, skip Redis (fail open) for this long before one probe.
+  redis:
+    skip-window: 1s
   default-max-tokens: 1024
   max-tokens-cap: 8192
   # Model catalog. Ids and list prices (USD per million tokens) taken on 2026-11-16 from the Anthropic

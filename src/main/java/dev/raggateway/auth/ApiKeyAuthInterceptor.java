@@ -5,7 +5,6 @@ import dev.raggateway.error.ErrorCode;
 import dev.raggateway.error.GatewayException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.servlet.HandlerInterceptor;
@@ -29,8 +28,7 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
 
     private final ApiKeyAuthenticator authenticator;
 
-    /** The authenticator is resolved on first use (it is provided by the key store configuration). */
-    public ApiKeyAuthInterceptor(@Lazy ApiKeyAuthenticator authenticator) {
+    public ApiKeyAuthInterceptor(ApiKeyAuthenticator authenticator) {
         this.authenticator = authenticator;
     }
 

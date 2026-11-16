@@ -7,7 +7,6 @@ import dev.raggateway.pipeline.FilterChain;
 import dev.raggateway.pipeline.FilterOrder;
 import dev.raggateway.pipeline.GatewayFilter;
 import dev.raggateway.pipeline.StreamSink;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -23,8 +22,7 @@ public class ModelSelectionFilter implements GatewayFilter {
     private final ModelSelector selector;
     private final TokenEstimator estimator;
 
-    /** The estimator is resolved on first use (it is provided by the core configuration). */
-    public ModelSelectionFilter(ModelSelector selector, @Lazy TokenEstimator estimator) {
+    public ModelSelectionFilter(ModelSelector selector, TokenEstimator estimator) {
         this.selector = selector;
         this.estimator = estimator;
     }

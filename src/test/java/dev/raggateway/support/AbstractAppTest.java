@@ -1,5 +1,7 @@
 package dev.raggateway.support;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability;
@@ -41,6 +43,10 @@ public abstract class AbstractAppTest {
     @Autowired
     protected StringRedisTemplate redis;
 
+    /** Provider circuit breakers (t03); shared by every test of the same context, so reset before each test. */
+    @Autowired
+    protected CircuitBreakerRegistry circuitBreakers;
+
     @DynamicPropertySource
     static void postgresProperties(DynamicPropertyRegistry registry) {
         var pg = SharedContainers.postgres();
@@ -54,7 +60,10 @@ public abstract class AbstractAppTest {
         resetState();
     }
 
-    /** Truncate every application table (keeps the Flyway history) and flush Redis. */
+    /**
+     * Truncate every application table (keeps the Flyway history), flush Redis and close every provider circuit
+     * breaker, so failures provoked by an earlier test cannot open a breaker under the next one.
+     */
     protected void resetState() {
         List<String> tables = jdbc.sql("""
                 SELECT tablename FROM pg_tables
@@ -67,6 +76,7 @@ public abstract class AbstractAppTest {
             c.serverCommands().flushAll();
             return null;
         });
+        circuitBreakers.getAllCircuitBreakers().forEach(CircuitBreaker::reset);
     }
 
     protected String baseUrl() {

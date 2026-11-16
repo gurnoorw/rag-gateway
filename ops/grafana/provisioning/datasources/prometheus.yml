@@ -1,4 +1,5 @@
-# Owned by t04.
+# Owned by t04. The dashboard's panels name this datasource by uid ("prometheus"); DashboardMetricsIT checks
+# that the two agree.
 apiVersion: 1
 datasources:
   - name: Prometheus
@@ -7,3 +8,6 @@ datasources:
     access: proxy
     url: http://prometheus:9090
     isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s   # = scrape_interval in ops/prometheus/prometheus.yml

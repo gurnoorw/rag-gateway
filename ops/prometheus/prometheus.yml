@@ -1,6 +1,9 @@
-# Scrapes the gateway running on the host (IDE or bootRun). Owned by t04.
+# Scrapes the gateway running on the host (IDE or bootRun), not in compose. Owned by t04.
+# host.docker.internal resolves on Docker Desktop/OrbStack natively and on Linux through the
+# extra_hosts host-gateway entry in docker-compose.yml.
 global:
   scrape_interval: 5s
+  scrape_timeout: 4s
 scrape_configs:
   - job_name: rag-gateway
     metrics_path: /actuator/prometheus

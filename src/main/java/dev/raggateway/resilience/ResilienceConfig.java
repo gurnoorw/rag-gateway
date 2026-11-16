@@ -6,6 +6,8 @@ import dev.raggateway.core.TokenEstimator;
 import dev.raggateway.pipeline.Terminal;
 import dev.raggateway.provider.LlmProvider;
 import dev.raggateway.resilience.FallbackProperties.ChainEntry;
+import dev.raggateway.validation.StructuralCheckingProvider;
+import dev.raggateway.validation.ValidationFailures;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig.SlidingWindowType;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
@@ -51,12 +53,20 @@ public class ResilienceConfig {
         return RetryRegistry.of(retryConfig(properties, FullJitterBackoff.of(properties)));
     }
 
-    /** The one {@link Terminal}; t07 decorates it with output validation. */
+    /**
+     * The router. Not the primary {@link Terminal}: {@code ValidatingTerminal} (t07, D-43) wraps it and is the one the
+     * pipeline gets, so the bean type is the class, which lets the validating terminal inject exactly this bean. Every
+     * adapter is wrapped in a {@link StructuralCheckingProvider}, so an empty {@code stop} answer is a retryable failure
+     * of that attempt, retried and fallen back like any other (C8).
+     */
     @Bean
-    Terminal fallbackRouter(FallbackProperties properties, GatewayProperties gateway,
-                            ObjectProvider<LlmProvider> providers, CircuitBreakerRegistry providerCircuitBreakers,
-                            RetryRegistry providerRetries, TokenEstimator estimator, MeterRegistry meters) {
-        List<LlmProvider> adapters = providers.orderedStream().toList();
+    FallbackRouter fallbackRouter(FallbackProperties properties, GatewayProperties gateway,
+                                  ObjectProvider<LlmProvider> providers, CircuitBreakerRegistry providerCircuitBreakers,
+                                  RetryRegistry providerRetries, TokenEstimator estimator, MeterRegistry meters) {
+        var structuralFailures = new ValidationFailures(meters, gateway.models().keySet());
+        List<LlmProvider> adapters = providers.orderedStream()
+                .<LlmProvider>map(p -> new StructuralCheckingProvider(p, structuralFailures))
+                .toList();
         checkChain(properties.chain(), gateway.models());
         return new FallbackRouter(adapters, properties.chain(), providerCircuitBreakers, providerRetries, estimator,
                 meters);

@@ -20,7 +20,7 @@ import dev.raggateway.pipeline.StreamSink;
 import dev.raggateway.pipeline.Terminal;
 import dev.raggateway.provider.LlmProvider;
 import dev.raggateway.provider.claude.ClaudeProvider;
-import dev.raggateway.resilience.FallbackRouter;
+import dev.raggateway.validation.ValidatingTerminal;
 import dev.raggateway.support.AbstractIntegrationTest;
 import dev.raggateway.support.TestData;
 import org.junit.jupiter.api.Test;
@@ -37,8 +37,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * The core beans are wired in the real application context, and the pipeline runs end to end on them:
- * key lookup, terminal (the t03 fallback router), Claude adapter (pointed at an unroutable port by the test
- * profile), request log.
+ * key lookup, terminal (t07 validation over the t03 fallback router), Claude adapter (pointed at an unroutable
+ * port by the test profile), request log.
  * The HTTP edge is Dev A's; the HTTP end-to-end test is ChatCompletionsE2EIT (after both branches merge).
  */
 class CoreConfigIT extends AbstractIntegrationTest {
@@ -53,7 +53,7 @@ class CoreConfigIT extends AbstractIntegrationTest {
     @Test
     void t01BeansAreWired() {
         assertThat(pipeline).isInstanceOf(DefaultGatewayPipeline.class);
-        assertThat(terminal).isInstanceOf(FallbackRouter.class);
+        assertThat(terminal).isInstanceOf(ValidatingTerminal.class); // t07: wraps the t03 router (D-43)
         assertThat(authenticator).isInstanceOf(JdbcApiKeyAuthenticator.class);
         assertThat(estimator).isNotNull();
         assertThat(providers).hasAtLeastOneElementOfType(ClaudeProvider.class);

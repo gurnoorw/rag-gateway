@@ -227,7 +227,18 @@ Merge A, then B. `./gradlew clean test`; `curl -s localhost:8080/actuator/promet
 
 **Design.** A `RequestCompletionListener` records per-request metrics from the finished `RequestContext`: request counter, total and time-to-first-token histograms, gateway overhead (total time minus the sum of attempt durations), tokens and cost. Other counters were already recorded by their own tasks under the names in `MetricNames`. Histograms carry only `provider` and `model` (D-19). Prometheus and Grafana run under the `obs` profile with provisioning in `ops/`. Decisions: D-19, G13.
 
-**Round prep:** none.
+**Round prep (reviewer, done):** test fixture `support/PrometheusScrape` (parses `/actuator/prometheus`: values by label, label names, metric families; both developers use it) and fixed label values in `MetricNames` (`PROVIDER_NONE`, `PROVIDER_CACHE`, `MODEL_OTHER`, `CODE_NONE`). No migration.
+
+**Rules from earlier rulings and this prep (D-38), both developers:**
+- **Already exported, do not add again:** `gateway.ratelimit.rejections{tenant,reason}`, `gateway.ratelimit.failopen{component}` (t02, through `FailOpenCounter`), `gateway.provider.retries{provider}`, `gateway.provider.fallbacks{from_provider,to_provider}` (t03), `gateway.requestlog.write` and `.write.failures` (t01), `gateway.listener.failures{listener}`, and Resilience4j's `resilience4j_circuitbreaker_*{name,state,kind}` (t03). The listener adds only the request-level metrics below.
+- **Label values are bounded:** `tenant` = tenant id; `provider` = the serving attempt's provider, `cache` for a hit, `none` when no provider was called; `model` = the catalog name actually used (the serving attempt's model, else `ctx.request().model()` **only if it is in `gateway.models`**, else `other`), never the raw requested string; `status_class` = `2xx|4xx|5xx` from `ctx.httpStatus()` (a 499 counts as `4xx`); `code` = `ctx.errorCode().code()` or `none`.
+- **Durations end at `ctx.finishNanos()`** (D-31): total = finish − start; TTFT = first token − start, recorded only when a token was sent; overhead = total − sum of attempt durations (a cache hit's overhead is its total time).
+- **Tokens and cost per attempt:** `gateway.tokens{tenant,model,direction}` adds each attempt's usage under that attempt's model (so the counters equal `billedUsage`, AC-t04-2); `gateway.cost.usd{tenant}` adds `CostCalculator.costUsd(ctx.attempts())`.
+- **Histograms:** explicit buckets, not Micrometer's default percentile histogram (~70 buckets per series): `gateway.request.duration` and `gateway.request.ttft` 25, 50, 100, 250, 500 ms, 1, 2.5, 5, 10, 30, 60, 120 s; `gateway.overhead` 1, 2, 5, 10, 25, 50, 100, 250, 500 ms, 1 s. Tags `provider`, `model` (overhead: `provider` only). No client-side percentiles (summaries cannot be aggregated across instances).
+- **Zero series at startup:** `MetricsConfig` registers the label-free and fixed-label counters (`failopen{component=limiter|budget}`, `requestlog.write.failures`) at 0, so dashboards and `rate()` see a series before the first failure. Series with a `tenant` label appear on first use.
+- **Label-policy scope:** AC-t04-3 checks `gateway_*` and `rag_*` series (plus Prometheus `le`); Resilience4j's own labels (`name`, `state`, `kind`) are outside it.
+
+
 
 ### Dev A: request metrics
 - **Owns:** `metrics/RequestMetricsListener.java`, `metrics/MetricsConfig.java` (percentile histograms and SLO buckets for the three timers), and tests.
@@ -240,8 +251,8 @@ Merge A, then B. `./gradlew clean test`; `curl -s localhost:8080/actuator/promet
   - AC-t04-7: the histogram exposes buckets that allow p50, p95 and p99 to be computed.
 
 ### Dev B: Prometheus, Grafana, checks
-- **Owns:** `ops/prometheus/prometheus.yml`, `ops/grafana/provisioning/**`, `ops/grafana/dashboards/rag-gateway.json`, `scripts/check_dashboard.py`, `scripts/check_obs.sh`.
-- **Codes against:** the names in `MetricNames` (Prometheus form: dots → underscores, counters `_total`, timers `_seconds_bucket/_count/_sum`). Panels only for metrics that exist after t04; the cache panel is added in t05.
+- **Owns:** `ops/prometheus/prometheus.yml`, `ops/grafana/provisioning/**`, `ops/grafana/dashboards/rag-gateway.json`, `scripts/check_dashboard.py`, `scripts/check_obs.sh`, and `src/test/java/dev/raggateway/metrics/DashboardMetricsIT.java` (loads the dashboard JSON, drives a mix of traffic through WireMock (success, 429, provider 500 with fallback), scrapes with `PrometheusScrape`, asserts every metric named in a panel query exists: AC-t04-6 inside `./gradlew test`; the Python script does the same against a running app).
+- **Codes against:** the names in `MetricNames` (Prometheus form: dots → underscores, counters `_total`, timers `_seconds_bucket/_count/_sum/_max`) and `resilience4j_circuitbreaker_state{name,state}`. Panels: request rate by tenant and status class; p50/p95/p99 of total, TTFT and overhead (`histogram_quantile` over `sum by (le, ...) (rate(..._bucket[5m]))`); tokens by tenant and model; cost by tenant; rejections by reason; breaker state; retries and fallbacks; fail-open; log-write failures. Only metrics that exist after t04; the cache panel is added in t05. Until t04-a is merged, `DashboardMetricsIT` is expected to fail for the request-level metrics: B's final commit (after rebasing on A) makes it green.
 - **Acceptance criteria:**
   - AC-t04-4: `docker compose --profile obs config --services` lists 4 services; without the profile, 2.
   - AC-t04-5: with the obs profile up, the Prometheus targets API shows the app as `up`.

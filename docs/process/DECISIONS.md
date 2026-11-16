@@ -74,6 +74,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-35 | Integration test bases | shared-Redis base separate from own-Redis base; unregistered Redis fails loudly |
 | D-36 | t02 review rulings | too-large before budget; budget 0 blocks; unknown model priced 0 with ERROR; one fail-open counter |
 | D-37 | t03 review rulings | exhausted chain = 503; 401/403/404 are configuration faults that move on; Claude header wait on a virtual thread; Ollama drain; test-base breaker reset |
+| D-38 | Request metrics details | bounded label values; explicit histogram buckets; per-attempt tokens; zero series at startup; no duplicates of earlier metrics |
 
 ---
 
@@ -504,4 +505,16 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
 - **e. Dev B's changes outside its file list:** accepted. `CoreConfig` lost the t01 terminal (required by the task); `AbstractAppTest` resets every circuit breaker before each test (breakers are singletons in a shared application context, so without it one test's failures open the breaker for the next); t01/t02 tests migrated to the router (e.g. AC-t01-10 now sees 503: its acceptance text allows "502 or 503"). Each was reported in the branch notes.
 - **f. Ollama details:** an in-stream `{"error":...}` line is `HTTP_STATUS` 500, retryable before the first token and billed zero there (D-34), the same treatment as Claude's in-stream error event; Ollama is priced 0, so only the token bucket is affected. Missing `prompt_eval_count`/`eval_count` read as 0: Ollama omits zero values (a fully cached prompt). The body is now drained after `done:true` so the JDK client can reuse the connection (bounded by the idle watchdog; a drain failure is ignored).
 - **g. Retry sleep:** confirmed: no `RetryImpl.setSleepFunction` (a JVM-wide static that would leak between tests and into production). Tests keep waits short through the backoff properties (base/cap), and the backoff itself is unit-tested (AC-t03-9).
+
+### D-38. Request metrics details (t04 prep)
+- **Context:** D-19 fixed names and the label allow-list. The request-level listener still needed rules for label values, buckets and end times that keep cardinality bounded and agree with the log row.
+- **Decision:**
+  - Label values come from bounded sets only. `model` is a catalog name or `other` (never the raw requested string, which a client controls); `provider` is the serving provider, `cache` or `none`; `status_class` is `2xx`/`4xx`/`5xx`; `code` is an `ErrorCode` or `none`. Constants are in `MetricNames`.
+  - Latency histograms use explicit buckets (12 for total and TTFT, 10 for overhead) instead of Micrometer's default percentile histogram, and no client-side percentiles.
+  - Durations end at `ctx.finishNanos()` (D-31). Tokens are counted per attempt under the attempt's model, cost from `CostCalculator`, so the metrics equal what is billed and logged.
+  - Fixed-label counters start at 0.
+  - Metrics already recorded by t01–t03, including Resilience4j's breaker series, are not duplicated.
+- **Reason:** a label value taken from the request is how a metrics backend falls over: one bad client sends a new model string per request. Explicit buckets put boundaries where decisions are made (the 5 s first-token timeout, the 50 ms overhead target), give ~12 series per provider/model instead of ~70, and stay aggregatable across instances, which client-side percentiles (summaries) are not. Zero-initialised counters make `rate()` and "absent means healthy" panels correct before the first failure.
+- **Rejected:** Micrometer's default percentile histogram (more series, boundaries not aligned with our thresholds); summaries with client-side p99 (cannot be summed over instances); `tenant` on histograms (×50 series for a question per-tenant counters already answer).
+- **Consequences:** p99 from buckets is an interpolated estimate within a bucket (e.g. between 5 s and 10 s); the README states the bucket edges next to every percentile. The cache panel arrives with t05.
 

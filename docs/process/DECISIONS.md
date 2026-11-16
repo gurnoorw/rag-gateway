@@ -69,6 +69,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-30 | Edge statuses | 499 on early cancel; upstream 401/403 → 502; model without adapter → 400 in t01 only; blank key starts with a warning |
 | D-31 | Request latency end point | frozen at `RequestContext.finish`, not at log time |
 | D-32 | Environment variable names | `GATEWAY_CLAUDE_*`, `GATEWAY_OLLAMA_BASE_URL`, not the `ANTHROPIC_*` names |
+| D-33 | t02 settlement and usage details | settle from billed usage of all attempts; no extra debit on under-estimate; rejected requests logged; `/v1/usage` contract |
 
 ---
 
@@ -453,4 +454,16 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
 - **Decision:** the gateway reads `GATEWAY_CLAUDE_BASE_URL`, `GATEWAY_CLAUDE_API_KEY` and `GATEWAY_OLLAMA_BASE_URL` (defaults: the public Anthropic API, empty key, `http://localhost:11434`). `.env.example` and `scripts/check_setup.sh` use the new names.
 - **Rejected:** keeping the shared names (silent misrouting; a key meant for another tool used by the gateway).
 - **Consequences:** the t14 secrets scan also looks for `GATEWAY_CLAUDE_API_KEY` followed by a key-like value.
+
+### D-33. t02 settlement and usage details
+- **Context:** after t01, attempts carry their own (possibly estimated) usage and model, and every request that reaches the pipeline gets a log row; the t02 plan did not yet say how settlement reads them.
+- **Decision:**
+  - Settlement in the rate-limit filter's `finally` uses `RequestContext.billedUsage()` and prices each attempt by its own model. Refund `reserved − billed` when positive; never take extra tokens when billed exceeds the reservation.
+  - The budget receives the same cost the request-log row records.
+  - Refund and budget-add failures are counted and logged, not retried, and never fail the request. When Redis fails during a refund, the in-memory bucket is refunded instead.
+  - Requests rejected by the filter (429, 400 too large) are logged with zero tokens.
+  - `GET /v1/usage?from=YYYY-MM-DD&to=YYYY-MM-DD` (UTC, `to` exclusive, default current month, at most 366 days) returns request count, token sums and cost for the caller's tenant only.
+- **Reason:** one source of truth for what a request cost (log row = budget increment); output tokens are capped by `max_tokens`, so the only possible overshoot comes from the input estimate, and taking more tokens after the fact would let the bucket go negative for an error the tenant did not make.
+- **Rejected:** debiting the bucket for the under-estimate (punishes the tenant for our estimator); settling from the last attempt only (failed validation attempts would be free, contradicting C8).
+- **Consequences:** a 429 counts as a request in `/v1/usage`; 429 correctness in t08 is computed from these rows.
 

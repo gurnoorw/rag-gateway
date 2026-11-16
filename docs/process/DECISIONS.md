@@ -78,6 +78,8 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-39 | t04 review rulings | overhead excludes provider time and deliberate waits; small test pools; first-increment rate gap documented; `$__rate_interval` |
 | D-40 | Cache details (t05 prep) | key after selection, `cache:v1:` prefix; store rules; single-flight with re-lock; fail open = go ahead; per-tenant entries |
 | D-41 | t05 review rulings | store after `chain.next`; holder re-reads; single-flight for the first fill only; lock TTL 30 s; no cache header on early errors |
+| D-42 | Model routing rules (t06 prep) | ordered rules on size and schema, first allowed match, default, 403 when nothing allowed |
+| D-43 | Output validation details (t07 prep) | validating terminal over the router; invalid = schema, truncated or refused; one retry; structural decorator per attempt |
 
 ---
 
@@ -577,4 +579,35 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - A hit's `model` field is the resolved request model, and the key contains that model, so a replay can't show a different model.
   - Entry keys (`cache:v1:<hash>`) and lock keys (`lock:cache:v1:<hash>`) can't collide with each other or with `rl:` and `budget:` keys.
   - Memory is bounded by Redis `maxmemory 128mb` with `volatile-lru`, which evicts cache entries (they have TTLs) before anything else; an eviction is just a miss.
+
+### D-42. Model routing rules (t06 prep)
+- **Context:** the plan says "simple, explainable rules"; the inputs available before the call are the estimated input tokens, `max_tokens`, whether a schema is present, and the tenant's allowed models.
+- **Decision:**
+  - Ordered rules from `gateway.routing.rules`, first match wins. Conditions: input-estimate bounds, `max_tokens` bound, schema present or not, all optional and AND-ed.
+  - A rule whose model the tenant may not use is skipped. No match → `default-model` if allowed, else 403 `model_not_allowed`.
+  - An explicit model is passed through if it is in the catalog and allowed (400 unknown, 403 not allowed).
+  - Rule and default models are checked against the catalog at startup.
+  - Defaults: short prompts with small outputs and no schema → `claude-haiku-5-5`; everything else → `claude-opus-5-5`.
+- **Reason:** static rules on request size are predictable, testable and explainable in one line per rule (the header and log row name the rule). They need no extra call before the real one. Size is the strongest cheap signal for both cost and latency. Skipping disallowed rules lets one rule set serve tenants with different entitlements.
+- **Rejected:**
+  - A classifier model choosing the tier (an extra model call per request, opaque decisions, its own eval).
+  - Latency-feedback routing (needs live latency per model; out of scope).
+  - Per-tenant rule sets (more config than the problem needs now).
+- **Consequences:** quality on the cheap tier is not measured by the router itself; t08 reports the cost effect and the private task notes describe how quality would be checked (offline eval on a sample routed both ways).
+
+### D-43. Output validation details (t07 prep)
+- **Context:** C8 fixed the policy (buffer when a schema is requested, one retry, 502), D-14 put validation in the terminal. The interplay with attempts, billing, the cache and structural checks needed exact rules.
+- **Decision:**
+  - `ValidatingTerminal` (primary `Terminal`) wraps `FallbackRouter`. With a schema it buffers each router call, treats finish `length` (truncated), `content_filter` (refused) and schema errors as invalid, marks that attempt `INVALID_OUTPUT` (usage kept, so it is billed), retries the whole router call once, and then emits the valid buffer as one burst or 502 `invalid_model_output` with a short error summary that does not echo the output.
+  - Without a schema the sink passes straight through.
+  - `StructuralCheckingProvider` decorates each adapter. A `stop` with no text is a retryable `MALFORMED_RESPONSE` before anything reached the client; empty text with `length` or `content_filter` passes.
+  - The schema is compiled in `RequestValidationFilter`, before the cache and the limiter.
+- **Reason:**
+  - Marking rather than removing the invalid attempt keeps billing honest (C8: tokens of failed attempts are charged), keeps the cache from storing it (its rule requires a `SUCCEEDED` serving attempt), and shows in the log why there were two calls.
+  - Doing the structural check per attempt, inside the router, makes an empty answer retryable and eligible for fallback like any other early failure, which a check after the router could not do.
+- **Rejected:**
+  - JSON repair (hides model errors).
+  - Provider-native structured output as the only guard (not every provider in the chain has it, and the gateway still has to enforce the caller's schema).
+  - Retrying more than once (doubles worst-case cost and latency for a model that already failed twice).
+- **Consequences:** a schema request gets no token streaming: its time to first byte is its full generation time. A provider failure in the middle of a buffered call is not retried by the router: the router counts the buffered tokens as sent, though none reached the client. Accepted for now: the client gets 502 at once. Resetting the buffer per router attempt would allow that retry later.
 

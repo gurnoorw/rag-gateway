@@ -313,11 +313,23 @@ Merge A, then B. `./gradlew clean test`; two identical `temperature:0` curls, se
 
 ## t06 and t07 (Round R6, two tasks; t06 merges first)
 
+**Round prep (reviewer, done):** `RequestContext.markLastAttemptInvalid(errorKind)` (t07 changes the last attempt's outcome to `INVALID_OUTPUT` while keeping its usage, so it is still billed and the cache never stores it). No migration, no new fixture: both tasks test with `FakeLlmProvider`, `RouterFixture`, WireMock and `ClaudeSse`.
+
+**File split (no file is touched by both):** Dev A (t06): `routing/**`, `application.yml`. Dev B (t07): `validation/**`, `resilience/ResilienceConfig.java`, `pipeline/RequestValidationFilter.java`. Neither touches `CacheFilter`, `RateLimitFilter`, `FallbackRouter`, the client sinks or `MetricsConfig`. t06 merges first; Dev B rebases and adds the end-to-end test.
+
 ### t06: Model router (Dev A)
 
 **Design.** `RuleBasedModelSelector` replaces `ExplicitModelSelector`. Rules come from `gateway.routing.rules` in order, first match wins; a rule matches on estimated input tokens, `max_tokens` and whether a schema is present, and names a catalog model. No match → `gateway.routing.default-model`. An explicit model is used as is if in the catalog and allowed for the tenant; otherwise 400 (unknown) or 403 `model_not_allowed`. Runs before the cache (C3). The selected model and rule go into the context, the header and the log row; a counter by rule. Tiers: cheap `claude-haiku-5-5`, strong/default `claude-opus-5-5` (D-08). Decisions: C3, D-08.
 - **Owns:** `routing/RuleBasedModelSelector.java`, `routing/RoutingProperties.java`, edits `routing/ModelSelectionFilter.java`, deletes `routing/ExplicitModelSelector.java`, owns `application.yml` this round, tests `RuleBasedModelSelectorTest`, `ModelSelectionE2EIT`.
 - **Codes against:** `ModelSelector`, `ModelSelection`, `Tenant.allows`, `MetricNames.ROUTING_DECISIONS`.
+- **Rules (D-42):**
+  - `gateway.routing`: `default-model` plus an ordered `rules` list. Each rule has a `name`, a `model` and a `when` block with optional `max-input-tokens` (estimate ≤), `min-input-tokens` (estimate ≥), `max-output-tokens` (`max_tokens` ≤) and `has-schema` (true/false); all given conditions must hold.
+  - **`auto`:** the first rule that matches and whose model the tenant allows. Otherwise the default model if the tenant allows it, otherwise 403 `model_not_allowed`.
+  - **Explicit model:** must be in the catalog (else 400 `invalid_request`) and allowed for the tenant (else 403 `model_not_allowed`). The rule is `null` for the header and log; the counter label is `explicit`.
+  - **Startup:** every rule model and the default must be in `gateway.models`, else startup fails. Rule names are bounded (they come from config).
+  - **Counter:** `gateway.routing.decisions{rule, model}` with `rule` = rule name, `default` or `explicit`.
+  - **Defaults:** cheap = `claude-haiku-5-5`, strong/default = `claude-opus-5-5` (D-08). Starting rules: `short` (≤ 2,000 input tokens and `max_tokens` ≤ 1,024 and no schema → haiku), then the default. The rule tables in the private task notes say why.
+  - The selected model feeds everything downstream unchanged: the cache key (AC-t06-8), the rate-limit reservation, the router's primary (its fallback chain is fixed config) and pricing.
 - **Acceptance criteria:**
   - AC-t06-1: `auto` with a short prompt and small `max_tokens` → the cheap model is called (WireMock asserts the model in the upstream body).
   - AC-t06-2: `auto` with a prompt above the configured token threshold → the strong model.
@@ -333,7 +345,25 @@ Merge A, then B. `./gradlew clean test`; two identical `temperature:0` curls, se
 
 **Design.** `ValidatingTerminal` becomes the primary `Terminal`, delegating to `FallbackRouter`. With a schema it gives the router a buffering sink, validates the complete output with `OutputValidator` (networknt, D-10), retries the whole call once if invalid, and only then emits to the real sink (tokens as one burst, then completion) or 502 `invalid_model_output`; every attempt stays recorded and billed. A response with finish reason `length` is invalid when a schema was requested. Without a schema it passes through. Structural checks (finish reason and usage present; empty content with `stop` is malformed) run per attempt in a `StructuralCheckingProvider` decorator that the router wraps around each adapter, so a broken response before the first token is retried like any provider failure. `RequestValidationFilter` compiles the schema up front (400). Decisions: C3, C8, D-10.
 - **Owns:** `validation/NetworkntOutputValidator.java`, `validation/ValidatingTerminal.java`, `validation/StructuralCheckingProvider.java`, edits `resilience/ResilienceConfig.java` (wrap adapters) and `pipeline/RequestValidationFilter.java` (schema check), tests `NetworkntOutputValidatorTest`, `ValidatingTerminalTest`, `StructuralCheckingProviderTest`. Does not touch `application.yml` (defaults in code).
-- **Codes against:** `Terminal`, `OutputValidator`, `LlmProvider`, `RequestContext.recordAttempt`, `MetricNames.VALIDATION_FAILURES`.
+- **Codes against:** `Terminal`, `OutputValidator`, `LlmProvider`, `RequestContext.markLastAttemptInvalid`, `MetricNames.VALIDATION_FAILURES`.
+- **Rules (D-43):**
+  - **Wiring:** change the router bean's return type to `FallbackRouter` so `ValidatingTerminal` can inject it, and mark `ValidatingTerminal` `@Primary` so the pipeline gets it. The router wraps every adapter in `StructuralCheckingProvider`.
+  - **Schema requested (`ctx.request().hasSchema()`):**
+    1. Give the router a buffering sink. Nothing reaches the client.
+    2. On completion, invalid means any of: finish reason `length` (`TRUNCATED`), `content_filter` (`REFUSED`), or output that does not validate (`SCHEMA`).
+    3. If invalid: `ctx.markLastAttemptInvalid(kind)`, count `gateway.validation.failures{model, kind=schema}`, and call the router once more.
+    4. Still invalid: 502 `invalid_model_output`, with a summary of at most 3 errors and 300 characters that never echoes the output.
+    5. Valid: emit the buffer as one `onToken`, then `onComplete`.
+    - A provider error inside a buffered call is passed through as the router reported it (no extra retry).
+  - **No schema:** pass the sink straight through. No buffering (AC-t07-5).
+  - **Structural check per attempt (`StructuralCheckingProvider`):**
+    - It swallows the adapter's `onComplete` and decides after `stream` returns.
+    - Finish `stop` with no text before it → `ProviderException(MALFORMED_RESPONSE, retryable)`: retried or fallen back like any provider failure before the first token. Count `kind=structural`.
+    - Otherwise forward `onComplete`.
+    - Empty text with `length` or `content_filter` is a legitimate answer (C8 refinement).
+    - Missing finish reason or usage is already `MALFORMED_RESPONSE` in both adapters.
+  - **Schema compile:** `RequestValidationFilter` calls `OutputValidator.checkSchema` and returns 400 before the cache, the limiter or any provider call (AC-t07-6).
+  - **Billing and cache:** every attempt stays recorded with its usage (`AttemptUsage`), including invalid ones (AC-t07-8). An invalid answer never reaches the cache's `onComplete`, and the serving attempt of a valid retry is the second one, so the cache's rules hold unchanged (AC-t07-7).
 - **B's final commit (after rebasing on t06):** `ValidationE2EIT` with WireMock: AC-t07-1, -3, -4, -5, -7, -8.
 - **Acceptance criteria:**
   - AC-t07-1: schema requested, valid JSON from the model → 200; the body validates against the schema.

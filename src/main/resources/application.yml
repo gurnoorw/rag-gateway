@@ -95,7 +95,7 @@ gateway:
   cache:
     enabled: true
     ttl: 6h
-    lock-ttl: 10s
+    lock-ttl: 30s
     poll-interval: 50ms
   # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
   # tools on the same machine, which could silently point the gateway at another host or account.

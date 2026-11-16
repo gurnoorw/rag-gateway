@@ -46,8 +46,10 @@ import java.util.function.LongSupplier;
  *   <li><b>Miss, single-flight.</b> {@code tryLock}. The holder (a token, {@link ResponseCache#FAILED_OPEN}
  *       included) reads once more (not after {@code FAILED_OPEN}), then calls {@code chain.next} through a recording wrapper and unlocks with its own
  *       token in {@code finally}. A request that did not get the lock polls every {@code pollInterval}: a stored
- *       answer is a hit; a free lock makes it the holder (the previous holder failed or finished without storing);
- *       after {@code lockTtl} it calls through without the lock. The time spent waiting is a deliberate wait
+ *       answer is a hit; a free lock means the previous fill failed or was not cacheable, so it reads once more and
+ *       otherwise calls through <b>without keeping the lock</b> (single-flight covers the first fill only; after a
+ *       failed one the waiters go in parallel instead of one after another, D-41); after {@code lockTtl} it calls
+ *       through without the lock. The time spent waiting is a deliberate wait
  *       ({@link RequestContext#addWaitNanos}), not gateway overhead (D-39).</li>
  *   <li><b>Store</b> only when the stream reached {@code onComplete} and the client sink accepted it, with finish
  *       reason {@code stop} or {@code length} (a {@code content_filter} refusal may depend on policy that changes),
@@ -145,8 +147,15 @@ public class CacheFilter implements GatewayFilter {
             }
             Optional<String> token = cache.tryLock(key, properties.lockTtl());
             if (token.isPresent()) {
+                // The lock came free without an answer: the previous fill failed or was not cacheable (an outage
+                // answered by the fallback, C21). Read once more, then release at once and call through without
+                // the lock, so the other waiters do not queue behind each other one fill at a time (D-41).
                 ctx.addWaitNanos(nanoClock.getAsLong() - start);
-                fillHoldingLock(ctx, sink, chain, key, token.get());
+                Optional<CachedResponse> late = ResponseCache.FAILED_OPEN.equals(token.get())
+                        ? Optional.empty() : cache.get(key);
+                cache.unlock(key, token.get());
+                if (late.isPresent()) replay(ctx, sink, late.get());
+                else fill(ctx, sink, chain, key);
                 return;
             }
         }

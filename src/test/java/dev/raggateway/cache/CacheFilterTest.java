@@ -493,6 +493,38 @@ class CacheFilterTest {
     }
 
     @Test
+    void afterAFillThatCannotBeStoredTheWaitersCallInParallelNotOneAfterAnother() throws Exception {
+        // Outage: Claude rejects the gateway's key (moves on at once, D-37), the slow fallback answers; a fallback
+        // answer is never stored (C21), so every waiter has to call. They must not queue behind each other (D-41).
+        int waiters = 4;
+        Duration fallbackTime = Duration.ofMillis(300);
+        var holderGate = new CountDownLatch(1);
+        claude.defaultScript(FakeLlmProvider.failBeforeFirstToken(401));
+        ollama.enqueue(script(new FakeLlmProvider.Await(holderGate), new FakeLlmProvider.Token("fallback"),
+                        new FakeLlmProvider.Complete(new Completion(FinishReason.STOP, new Usage(5, 1), LLAMA))))
+                .defaultScript(FakeLlmProvider.slowReply(fallbackTime, "fallback"));
+        ChatRequest cold = request(0.0, "hello");
+
+        try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<Result> holder = pool.submit(() -> run(ACME, cold));
+            await().atMost(Duration.ofSeconds(5)).until(() -> ollama.calls() == 1);
+            List<Future<Result>> rest = new ArrayList<>();
+            for (int i = 0; i < waiters; i++) rest.add(pool.submit(() -> run(ACME, cold)));
+            await().atMost(Duration.ofSeconds(5)).until(() -> cache.refusedThreads.size() >= waiters);
+            long released = System.nanoTime();
+            holderGate.countDown();
+            assertThat(holder.get(10, TimeUnit.SECONDS).ctx.fallbackUsed()).isTrue();
+            for (Future<Result> f : rest) assertThat(f.get(10, TimeUnit.SECONDS).text()).isEqualTo("fallback");
+            Duration all = Duration.ofNanos(System.nanoTime() - released);
+
+            // In parallel: about one fallback time. One after another would be 4 × 300 ms.
+            assertThat(all).isLessThan(fallbackTime.multipliedBy(waiters).minusMillis(300));
+        }
+        assertThat(ollama.calls()).isEqualTo(1 + waiters);
+        assertThat(store.get(key(ACME, cold))).as("fallback answers are never stored").isEmpty();
+    }
+
+    @Test
     void aHolderSlowerThanTheLockTtlLetsAWaiterCallOnceTheLockExpires() throws Exception {
         Duration lockTtl = Duration.ofMillis(300);
         var p = pipeline(filter(new CacheProperties(true, null, lockTtl, Duration.ofMillis(20))));

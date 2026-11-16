@@ -310,21 +310,22 @@ class ChatCompletionsE2EIT extends AbstractIntegrationTest {
     // ---- AC-t01-10 ----
 
     @Test
-    void ac_t01_10_providerFailureBeforeFirstTokenIsA502JsonError() throws Exception {
+    void ac_t01_10_providerFailureBeforeFirstTokenIsAJsonErrorStatus() throws Exception {
         CLAUDE.stubFor(post("/v1/messages").willReturn(aResponse().withStatus(500)
                 .withHeader("Content-Type", "application/json")
                 .withBody("{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream broke\"}}")));
 
         HttpResponse<String> response = send(chat(body(true, "hi")).header("Authorization", "Bearer " + KEY).build());
 
-        assertThat(response.statusCode()).isIn(502, 503);
+        // From t03 the router retries the 500 and tries the fallback chain first: all failed is a 503.
+        assertThat(response.statusCode()).isEqualTo(503);
         assertThat(response.headers().firstValue("Content-Type")).hasValueSatisfying(
                 ct -> assertThat(ct).startsWith("application/json"));
         JsonNode error = JSON.readTree(response.body()).path("error");
-        assertThat(error.path("code").asText()).isEqualTo("provider_error");
+        assertThat(error.path("code").asText()).isEqualTo("all_providers_failed");
         assertThat(error.path("request_id").asText()).isEqualTo(response.headers().firstValue("X-Request-Id").orElseThrow());
         Map<String, Object> row = awaitSingleLogRow();
-        assertThat(row).containsEntry("status", "error").containsEntry("error_code", "provider_error");
+        assertThat(row).containsEntry("status", "error").containsEntry("error_code", "all_providers_failed");
         assertThat(((Number) row.get("http_status")).intValue()).isEqualTo(response.statusCode());
     }
 

@@ -95,8 +95,13 @@ class ChatCompletionsE2EIT extends AbstractIntegrationTest {
                 .POST(HttpRequest.BodyPublishers.ofString(json));
     }
 
+    /** Request ids of the responses this test received; earlier tests' late log rows are ignored. */
+    private final List<UUID> sentRequestIds = new ArrayList<>();
+
     HttpResponse<String> send(HttpRequest request) throws Exception {
-        return http.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        response.headers().firstValue("X-Request-Id").map(UUID::fromString).ifPresent(sentRequestIds::add);
+        return response;
     }
 
     static void stubClaude(String sseBody) {
@@ -112,13 +117,21 @@ class ChatCompletionsE2EIT extends AbstractIntegrationTest {
         return events;
     }
 
+    /**
+     * The one log row written for this test's requests. Rows are written after the response is closed (C7),
+     * so a row can appear just after the client returns, and a previous test's row can land after this
+     * test's cleanup; filtering on this test's request ids keeps the check exact.
+     */
     Map<String, Object> awaitSingleLogRow() {
-        await().atMost(Duration.ofSeconds(5)).until(() ->
-                jdbc.sql("SELECT count(*) FROM request_log").query(Long.class).single() >= 1);
-        // the row is written after the response is closed (C7), so it can appear just after the client returns
-        List<Map<String, Object>> rows = jdbc.sql("SELECT * FROM request_log").query().listOfRows();
+        await().atMost(Duration.ofSeconds(5)).until(() -> !ownLogRows().isEmpty());
+        List<Map<String, Object>> rows = ownLogRows();
         assertThat(rows).hasSize(1);
         return rows.get(0);
+    }
+
+    List<Map<String, Object>> ownLogRows() {
+        return jdbc.sql("SELECT * FROM request_log WHERE request_id = ANY(?)")
+                .param(sentRequestIds.toArray(UUID[]::new)).query().listOfRows();
     }
 
     /** Every row of every application table, as JSON text, for "is this string stored anywhere" checks. */
@@ -202,8 +215,7 @@ class ChatCompletionsE2EIT extends AbstractIntegrationTest {
             assertThat(error.path("code").asText()).isEqualTo("unauthorized");
         }
         CLAUDE.verify(0, postRequestedFor(urlEqualTo("/v1/messages")));
-        assertThat(jdbc.sql("SELECT count(*) FROM request_log").query(Long.class).single())
-                .as("rejected at the edge: no tenant context, no log row (C7)").isZero();
+        assertThat(ownLogRows()).as("rejected at the edge: no tenant context, no log row (C7)").isEmpty();
     }
 
     // ---- AC-t01-5 ----
@@ -272,7 +284,8 @@ class ChatCompletionsE2EIT extends AbstractIntegrationTest {
         assertThat(response.statusCode()).isEqualTo(200);
         CLAUDE.verify(1, postRequestedFor(urlEqualTo("/v1/messages"))); // the prompt did go upstream
         awaitSingleLogRow();
-        String rowText = jdbc.sql("SELECT row_to_json(r)::text FROM request_log r").query(String.class).single();
+        String rowText = jdbc.sql("SELECT row_to_json(r)::text FROM request_log r WHERE request_id = ?")
+                .param(awaitSingleLogRow().get("request_id")).query(String.class).single();
         assertThat(rowText).doesNotContain(marker);
     }
 

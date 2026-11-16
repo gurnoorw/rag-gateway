@@ -74,21 +74,21 @@ import java.util.concurrent.CompletionException;
  *
  * <p><b>Waiting for the response headers.</b> The SDK's blocking {@code createStreaming} returns only once the
  * headers arrive and gives no handle to cancel the call before that; closing the {@link StreamResponse} is only
- * possible after. So the adapter adds an SDK {@link Interceptor}: for a call made by {@link #stream} it sends
- * the request with {@code executeAsync} and waits on a future of its own, which the watchdog cancels. The
- * adapter thread is free at the first-token deadline. The OkHttp call itself cannot be cancelled from there:
- * the SDK cancels it only when its transport's own future is cancelled, and the interceptor sits above the
- * SDK's logging layer, which hands out a derived future. So an abandoned call is closed the moment its
- * headers arrive, and the socket read timeout (set here to first-token + idle, a backstop later than both
- * watchdog deadlines, so the watchdog decides the error kind) bounds a call whose headers never come.
+ * possible after. So the adapter adds an SDK {@link Interceptor}: for a call made by {@link #stream} it runs
+ * the SDK's blocking call on a separate virtual thread and waits on a future of its own, which the watchdog
+ * cancels. The adapter thread is free at the first-token deadline. The abandoned call itself keeps running:
+ * it is closed the moment its headers arrive, and the socket read timeout (set here to first-token + idle, a
+ * backstop later than both watchdog deadlines, so the watchdog decides the error kind) bounds a call whose
+ * headers never come. Cost: one parked virtual thread and one socket per abandoned call, for at most that
+ * backstop (D-37).
  * <ul>
  *   <li>Rejected: a per-request read timeout equal to the first-token timeout (it would also cap every gap
  *       mid-stream at 5 s and kill a long thinking phase); interrupting the thread (does not unblock a socket
  *       read on a platform thread); replacing the SDK transport to reach its own future (needs SDK-internal
  *       backend wiring that the client builder normally does).</li>
- *   <li>Cost: until the headers arrive the call runs on OkHttp's dispatcher, which admits 64 calls at once
- *       (the SDK sets the per-host limit to the same value); more calls queue, and the queue time counts
- *       towards the first-token timeout. The slot is released when the headers arrive.</li>
+ *   <li>Rejected: the SDK's {@code executeAsync} (an earlier version): it goes through OkHttp's dispatcher,
+ *       which the SDK caps at 64 calls (per host = max), so calls beyond 64 waiting for headers would queue
+ *       and spend their first-token budget in the queue.</li>
  * </ul>
  */
 public final class ClaudeProvider implements LlmProvider {
@@ -110,8 +110,12 @@ public final class ClaudeProvider implements LlmProvider {
         StreamWatchdog watchdog = CALL_WATCHDOG.get();
         if (watchdog == null) return delegate.execute(httpRequest, options);
         CompletableFuture<HttpResponse> waiting = new CompletableFuture<>();
-        delegate.executeAsync(httpRequest, options).whenComplete((response, error) -> {
-            if (error != null) waiting.completeExceptionally(error);
+        // The blocking call runs on its own virtual thread so this thread can stop waiting at the deadline. Not
+        // executeAsync: OkHttp's dispatcher would cap calls waiting for headers at 64 (D-37).
+        CompletableFuture.supplyAsync(() -> delegate.execute(httpRequest, options), ClaudeProvider::startVirtual)
+                .whenComplete((response, error) -> {
+            Throwable cause = error instanceof CompletionException ce && ce.getCause() != null ? ce.getCause() : error;
+            if (cause != null) waiting.completeExceptionally(cause);
             else if (!waiting.complete(response)) response.close(); // abandoned: close the late response
         });
         watchdog.guard(() -> waiting.cancel(false));
@@ -125,6 +129,11 @@ public final class ClaudeProvider implements LlmProvider {
             throw new AnthropicIoException("Claude request failed", cause);
         }
     });
+
+    /** Runs one abandonable call; a virtual thread per call, so nothing is pooled or capped. */
+    private static void startVirtual(Runnable task) {
+        Thread.ofVirtual().name("claude-call").start(task);
+    }
 
     private final AnthropicClient client;
     private final Map<String, ModelProperties> models;

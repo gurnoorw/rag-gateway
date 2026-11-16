@@ -19,8 +19,9 @@ import java.time.Duration;
  * cannot pick up a real key or base URL from the environment):
  * <ul>
  *   <li>{@code baseUrl}: the Anthropic API, or WireMock in tests;</li>
- *   <li>{@code timeout}: connect from {@code connect-timeout}, read (longest silence on the socket) from
- *       {@code idle-timeout}; the per-event watchdogs come in t03;</li>
+ *   <li>{@code timeout}: connect from {@code connect-timeout}. {@link ClaudeProvider} replaces the read timeout
+ *       with first-token + idle timeout, a backstop behind its stream watchdog (t03), so the value set here is
+ *       only what other uses of this client would see;</li>
  *   <li>{@code maxRetries(0)}: the fallback router owns retries (D-07);</li>
  *   <li>the key goes in {@code X-Api-Key}, the Messages API's header for API keys. SDK 3.3.0 sends any static
  *       credential, including one given to {@code apiKey(..)}, as {@code Authorization: Bearer} unless the
@@ -54,8 +55,9 @@ public class ClaudeClientConfig {
     public static AnthropicClient client(ProviderProperties p) {
         boolean blank = p.apiKey() == null || p.apiKey().isBlank();
         if (blank) {
-            log.warn("gateway.providers.claude.api-key is empty (GATEWAY_CLAUDE_API_KEY): Claude calls will fail "
-                    + "with 502 provider_error until a key is set (D-30)");
+            log.warn("gateway.providers.claude.api-key is empty (GATEWAY_CLAUDE_API_KEY): Claude calls get an "
+                    + "upstream 401 and the request moves on to the next provider in the fallback chain, or fails "
+                    + "with 503 all_providers_failed (D-30, D-37)");
         }
         String key = blank ? NO_KEY : p.apiKey();
         Duration connect = p.connectTimeout() != null ? p.connectTimeout() : Duration.ofSeconds(1);

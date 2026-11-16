@@ -192,6 +192,11 @@ class MetricLabelPolicyIT extends AbstractIntegrationTest {
                 .withBody(ClaudeSse.reply(HAIKU, 8, 5, invalidOutput)));
         assertThat(chatWithSchema(payingKey, HAIKU, prompt()).statusCode()).isEqualTo(502);
 
+        // t06: one "auto" request, so the routing counter carries a rule-name label too.
+        claude(aResponse().withStatus(200).withHeader("Content-Type", "text/event-stream")
+                .withBody(ClaudeSse.reply(HAIKU, 8, 2, "routed")));
+        assertThat(chat(payingKey, "auto", false, prompt(), null).statusCode()).isEqualTo(200);
+
         await().atMost(Duration.ofSeconds(5)).until(() -> requestsOfOwnTenants() == pipelineRequests);
         PrometheusScrape scrape = PrometheusScrape.fetch(baseUrl());
 
@@ -208,6 +213,8 @@ class MetricLabelPolicyIT extends AbstractIntegrationTest {
         assertThat(scrape.sum("gateway_ratelimit_rejections_total", Map.of("tenant", suspended))).isEqualTo(1.0);
         assertThat(scrape.sum("gateway_validation_failures_total", Map.of("model", HAIKU, "kind", "schema")))
                 .isEqualTo(2.0);
+        assertThat(scrape.sum("gateway_routing_decisions_total", Map.of("rule", "short", "model", HAIKU))).isEqualTo(1.0);
+        assertThat(scrape.sum("gateway_routing_decisions_total", Map.of("rule", "explicit"))).isPositive();
 
         assertThat(scrape.labelNames(MetricLabelPolicy::inScope))
                 .isSubsetOf(union(MetricNames.ALLOWED_LABELS, Set.of(MetricLabelPolicy.PROMETHEUS_LE)));

@@ -93,11 +93,25 @@ class NetworkntOutputValidatorTest {
                     "{\"$ref\":\"" + base + "/s.json\"}",
                     "{\"$id\":\"" + base + "/root.json\",\"$ref\":\"other.json\"}",
                     "{\"$schema\":\"" + base + "/meta.json\"}",
-                    "{\"$ref\":\"classpath:application.yml\"}")) {
-                assertThatThrownBy(() -> validator.checkSchema(schema)).isInstanceOf(GatewayException.class)
+                    "{\"$ref\":\"classpath:application.yml\"}",
+                    // review additions: nested, dynamic, other schemes, $id base set deep inside the document
+                    "{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"" + base + "/a.json\"}}}",
+                    "{\"$defs\":{\"x\":{\"$id\":\"" + base + "/deep/\",\"$ref\":\"y.json\"}},\"$ref\":\"#/$defs/x\"}",
+                    "{\"$dynamicRef\":\"" + base + "/d.json#node\"}",
+                    "{\"items\":{\"$ref\":\"" + base + "/i.json\"},\"type\":\"array\"}",
+                    "{\"$ref\":\"file:///etc/hostname\"}",
+                    "{\"$ref\":\"jar:file:/tmp/x.jar!/s.json\"}",
+                    "{\"$ref\":\"urn:example:schema\"}")) {
+                assertThatThrownBy(() -> validator.checkSchema(schema)).as(schema).isInstanceOf(GatewayException.class)
                         .satisfies(e -> assertThat(((GatewayException) e).code()).isEqualTo(ErrorCode.INVALID_REQUEST));
+                // The output-validation path compiles the schema again with the same factory: no fetch there either.
+                try {
+                    validator.validate(schema, "{}");
+                } catch (GatewayException expected) {
+                    // refused like checkSchema
+                }
             }
-            assertThat(hits).hasValue(0);
+            assertThat(hits).as("the gateway never fetched a URL").hasValue(0);
         } finally {
             server.stop(0);
         }

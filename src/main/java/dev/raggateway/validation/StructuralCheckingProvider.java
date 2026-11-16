@@ -28,9 +28,9 @@ import java.util.Objects;
  *       which treats it as a contract breach.</li>
  * </ul>
  *
- * <p>Billing: the router never sees the held-back completion, so the rejected attempt is recorded as a failure before
- * the first token with an estimated input (D-34: the provider did process the prompt), not with the usage the
- * provider reported. The estimate is close for the input and the output was empty.
+ * <p>Billing: the exception carries the usage the provider reported for the rejected answer, and the router bills
+ * that, not an estimate (D-44). It matters for thinking models: an empty answer can still have cost thousands of
+ * output (thinking) tokens.
  */
 public final class StructuralCheckingProvider implements LlmProvider {
 
@@ -66,7 +66,8 @@ public final class StructuralCheckingProvider implements LlmProvider {
         if (completion.finishReason() == FinishReason.STOP && !held.sawText) {
             failures.increment(request.model(), ValidationFailures.STRUCTURAL);
             throw new ProviderException(ProviderException.Kind.MALFORMED_RESPONSE,
-                    "provider " + delegate.name() + " ended with finish reason stop and no text", true, 0, null, null);
+                    "provider " + delegate.name() + " ended with finish reason stop and no text", true, 0, null, null,
+                    completion.usage());
         }
         sink.onComplete(completion);
     }

@@ -182,11 +182,24 @@ class StructuralCheckingProviderTest {
         Attempt first = ctx.attempts().get(0);
         assertThat(first.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN);
         assertThat(first.errorKind()).isEqualTo("MALFORMED_RESPONSE");
-        // Billed as an estimate of the input (D-34): the provider processed the prompt.
-        assertThat(first.usageEstimated()).isTrue();
-        assertThat(first.usage().inputTokens()).isPositive();
-        assertThat(first.usage().outputTokens()).isZero();
+        // Billed with the usage the provider reported for the empty answer, not an estimate (D-44).
+        assertThat(first.usageEstimated()).isFalse();
+        assertThat(first.usage()).isEqualTo(new Usage(12, 0));
         assertThat(ctx.attempts().get(1).outcome()).isEqualTo(AttemptOutcome.SUCCEEDED);
+    }
+
+    @Test
+    void anEmptyAnswerAfterLongThinkingIsBilledForItsReportedOutputTokens() {
+        // A thinking model can spend many output tokens and still end with no text (D-44).
+        claude.enqueue(script(new Complete(new Completion(FinishReason.STOP, new Usage(40, 900), "upstream-id"))))
+                .enqueue(reply("fine"));
+        var router = new RouterFixture(List.of(checked), List.of()).router;
+        var ctx = ctx(request(OPUS));
+
+        router.call(ctx, new Events());
+
+        assertThat(ctx.attempts().get(0).usage()).isEqualTo(new Usage(40, 900));
+        assertThat(ctx.billedUsage().outputTokens()).isGreaterThanOrEqualTo(900);
     }
 
     @Test

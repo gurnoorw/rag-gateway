@@ -1,5 +1,7 @@
 package dev.raggateway.provider;
 
+import dev.raggateway.core.Usage;
+
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,6 +22,7 @@ public final class ProviderException extends Exception {
     private final boolean retryable;
     private final int httpStatus;
     private final Duration retryAfter;
+    private final Usage reportedUsage;
 
     /**
      * @param kind       failure class
@@ -31,11 +34,27 @@ public final class ProviderException extends Exception {
      */
     public ProviderException(Kind kind, String message, boolean retryable, int httpStatus,
                              Duration retryAfter, Throwable cause) {
+        this(kind, message, retryable, httpStatus, retryAfter, cause, null);
+    }
+
+    /**
+     * @param reportedUsage usage the provider reported for a call that is nevertheless a failure (e.g. a complete
+     *                      but empty answer rejected by the structural check, D-44), or null; billing then uses it
+     *                      instead of an estimate
+     */
+    public ProviderException(Kind kind, String message, boolean retryable, int httpStatus,
+                             Duration retryAfter, Throwable cause, Usage reportedUsage) {
         super(message, cause);
         this.kind = Objects.requireNonNull(kind, "kind");
         this.retryable = retryable;
         this.httpStatus = httpStatus;
         this.retryAfter = retryAfter;
+        this.reportedUsage = reportedUsage;
+    }
+
+    /** Usage the provider reported before this failure was raised, if any (D-44). */
+    public Optional<Usage> reportedUsage() {
+        return Optional.ofNullable(reportedUsage);
     }
 
     public Kind kind() {

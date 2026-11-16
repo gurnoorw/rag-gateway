@@ -24,8 +24,14 @@ class AttemptUsageTest {
     @Test
     void providerReportedUsageWins() {
         var done = new Completion(FinishReason.STOP, new Usage(7, 3), "m");
-        assertThat(AttemptUsage.of(AttemptOutcome.CLIENT_CANCELLED, "CLIENT_CANCELLED", done, REQUEST, "abc", ESTIMATOR))
+        assertThat(AttemptUsage.of(AttemptOutcome.CLIENT_CANCELLED, "CLIENT_CANCELLED", done.usage(), REQUEST, "abc", ESTIMATOR))
                 .isEqualTo(new AttemptUsage(new Usage(7, 3), false));
+    }
+
+    @Test
+    void usageCarriedByAFailureWinsOverAnEstimate() {
+        assertThat(AttemptUsage.of(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN, "MALFORMED_RESPONSE", new Usage(40, 900),
+                REQUEST, "", ESTIMATOR)).isEqualTo(new AttemptUsage(new Usage(40, 900), false));
     }
 
     @Test

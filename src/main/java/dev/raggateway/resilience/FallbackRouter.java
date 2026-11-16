@@ -6,6 +6,7 @@ import dev.raggateway.core.ChatRequest;
 import dev.raggateway.core.Completion;
 import dev.raggateway.core.RequestContext;
 import dev.raggateway.core.TokenEstimator;
+import dev.raggateway.core.Usage;
 import dev.raggateway.error.ErrorCode;
 import dev.raggateway.error.GatewayException;
 import dev.raggateway.metrics.MetricNames;
@@ -223,6 +224,7 @@ public final class FallbackRouter implements Terminal {
                     "CLIENT_CANCELLED"));
             throw e;
         } catch (ProviderException e) {
+            observer.reportedUsage = e.reportedUsage().orElse(null); // e.g. an empty answer the provider billed (D-44)
             ctx.recordAttempt(attempt(provider, request, fallback, failedOutcome(observer), observer, start,
                     e.kind().name()));
             log.warn("provider {} attempt {} failed: kind={} status={} retryable={} fallbackAllowed={} tokensSent={}",
@@ -254,7 +256,8 @@ public final class FallbackRouter implements Terminal {
     private Attempt attempt(LlmProvider provider, ChatRequest request, boolean fallback, AttemptOutcome outcome,
                             AttemptSink observer, long start, String errorKind) {
         long now = nanoClock.getAsLong();
-        AttemptUsage billed = AttemptUsage.of(outcome, errorKind, observer.completion, request,
+        AttemptUsage billed = AttemptUsage.of(outcome, errorKind,
+                observer.completion != null ? observer.completion.usage() : observer.reportedUsage, request,
                 observer.text.toString(), estimator);
         long firstToken = observer.firstTokenNanos < 0 ? -1 : observer.firstTokenNanos - start;
         return new Attempt(provider.name(), request.model(), fallback, outcome, billed.usage(), billed.estimated(),
@@ -342,6 +345,7 @@ public final class FallbackRouter implements Terminal {
         private int tokens;
         private long firstTokenNanos = -1;
         private Completion completion;
+        private Usage reportedUsage;
 
         AttemptSink(StreamSink delegate, LongSupplier nanoClock) {
             super(delegate);

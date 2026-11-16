@@ -499,85 +499,46 @@ bash scripts/quickstart_check.sh && bash scripts/demo.sh && bash scripts/check_m
 
 ## t09: Document ingestion, chunking, embeddings into pgvector (Round R8)
 
-**Design.** `PUT /v1/rag/collections/{collection}/documents/{docId}` (admin key, ≤ 1 MB) writes the document row and an outbox row in one transaction and returns 202 (C4). A scheduled worker claims jobs (`FOR UPDATE SKIP LOCKED`), loads the document, chunks it (headings → paragraphs → sentences, ~400/~50 tokens, title stored on each chunk), embeds in one batch call, and replaces the document's chunks in one transaction; embedding runs outside any transaction. Chunks copy `tenant_id`, `collection_id` and `acl_groups` (C16, C17) and have `vector(768)` (C1), a generated `tsvector`, HNSW cosine and GIN indexes. `GET` on the same URL returns status and chunk count. The fake embedder is the default here (D-18). LLD: "Indexing worker and the outbox". Decisions: C1, C4, C16, C17, D-18.
+**Design.** `PUT /v1/rag/collections/{collection}/documents/{docId}` (admin key, body ≤ 1 MB, `{"title", "content", "acl_groups"}`) writes the document row and an outbox row in one transaction and returns 202 (C4). A scheduled worker claims a few jobs (`FOR UPDATE SKIP LOCKED`, with a lease) and handles them one at a time: load the document, chunk it (headings → paragraphs → sentences, ~400/~50 estimated tokens, title stored on each chunk), embed in batches of at most 20 chunks per call with no transaction and no connection held, then replace the document's chunks and set its status in one transaction. Chunks copy `tenant_id`, `collection_id` and `acl_groups` (C16, C17) and have `vector(768)` (C1), a generated `tsvector`, HNSW cosine and GIN indexes. `GET` on the same URL (admin key) returns status and chunk count. The fake embedder is the default under the test profile (D-18). Heap and connections are bounded per D-47. LLD: "Indexing worker and the outbox". Decisions: C1, C4, C16, C17, D-18, D-46, D-47.
 
-**Round prep (reviewer):** `V4__rag_schema.sql` below, and internal interfaces in `rag/ingest/`: `OutboxEvent(UUID id, UUID documentId, String contentHash, int attempts)`, `OutboxStore` (`insert`, `claimBatch(int)`, `markDone`, `release`, `markDead`), `DocumentStore` (`upsert`, `find(tenant, collection, docId)`, `findById`, `markIndexed(id, chunkCount)`, `markFailed`), `ChunkStore` (`replaceForDocument(document, List<ChunkText>, List<float[]>)`), `IndexedDocument` record.
-
-```sql
--- V4
-CREATE TABLE documents (
-  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  tenant_id     text NOT NULL,
-  collection_id text NOT NULL,
-  doc_id        text NOT NULL,
-  title         text NOT NULL,
-  content       text NOT NULL,
-  acl_groups    text[] NOT NULL,
-  content_hash  char(64) NOT NULL,
-  status        text NOT NULL DEFAULT 'queued',   -- queued | indexed | failed
-  chunk_count   integer NOT NULL DEFAULT 0,
-  updated_at    timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, collection_id, doc_id)
-);
-CREATE TABLE chunks (
-  chunk_id      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  document_id   uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-  tenant_id     text NOT NULL,
-  collection_id text NOT NULL,
-  doc_id        text NOT NULL,
-  title         text NOT NULL,
-  ordinal       integer NOT NULL,
-  text          text NOT NULL,
-  tsv           tsvector GENERATED ALWAYS AS (to_tsvector('english', title || ' ' || text)) STORED,
-  embedding     vector(768) NOT NULL,
-  acl_groups    text[] NOT NULL,
-  UNIQUE (document_id, ordinal)
-);
-CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops);
-CREATE INDEX chunks_tsv_gin        ON chunks USING gin (tsv);
-CREATE INDEX chunks_acl_gin        ON chunks USING gin (acl_groups);
-CREATE INDEX chunks_tenant_coll    ON chunks (tenant_id, collection_id);
-CREATE TABLE outbox (
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  document_id  uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-  content_hash char(64) NOT NULL,
-  status       text NOT NULL DEFAULT 'PENDING',  -- PENDING | IN_PROGRESS | DONE | DEAD
-  attempts     integer NOT NULL DEFAULT 0,
-  lease_until  timestamptz,
-  last_error   text,
-  created_at   timestamptz NOT NULL DEFAULT now()
-);
-CREATE INDEX outbox_claimable ON outbox (created_at) WHERE status IN ('PENDING', 'IN_PROGRESS');
-```
+**Round prep (reviewer, on `main`):**
+- `V4__rag_schema.sql`: `documents`, `chunks` (`vector(768)`, generated `tsv`, HNSW cosine, GIN on `tsv` and `acl_groups`, `(tenant_id, collection_id)`), `outbox` (lease, attempts, `last_error`), with CHECK constraints on statuses and non-empty groups; `documents.tenant_id` references `tenants`.
+- Contracts in `rag/ingest/`: `DocumentUpsert` (validated PUT body and address; id and group patterns), `DocumentHash` (SHA-256 over title, content, sorted groups, length-prefixed), `DocumentStatus`, `IndexedDocument`, `UpsertResult`, `OutboxEvent`, `OutboxStore` (`insert`, `claimBatch(max, lease)`, `markDone`, `release`, `markDead`), `DocumentStore` (`upsert`, `find`, `findById`, `markFailed`), `ChunkStore` (`replaceForDocument`, which also sets status `indexed` and the count in its transaction; `countForDocument`). Existing: `Chunker`, `Embedder`, `ChunkText`.
+- Test fixtures: `support/OllamaEmbedJson` (`/api/embed` bodies, from the official docs), `src/test/resources/rag/chunker-fixture.md` (three heading levels, a ~630-token paragraph, a list, a code block, abbreviations and version numbers), `rag/ingest/IngestContractsTest`.
+- Corpus pin checked from here: `kubernetes/website` at `adaa04d017c75981660828f869b364a266b0ef53`; `LICENSE` there is CC BY 4.0; every `.md` under `content/en/docs/{concepts,tutorials,setup}` is 256 files, 2.92 MB, largest 65 KB, and all 256 returned 200 from `raw.githubusercontent.com` (D-47).
 
 ### Dev A: write API and stores
-- **Owns:** `rag/ingest/DocumentController.java`, `rag/ingest/DocumentService.java`, `rag/ingest/JdbcDocumentStore.java`, `rag/ingest/JdbcOutboxStore.java` (claim SQL as in the LLD, with lease), `rag/ingest/RequestSizeLimitFilter.java`, and tests.
-- **Codes against:** `DocumentStore`, `OutboxStore`, `ApiKeyPrincipal.admin()`, `ErrorCode.FORBIDDEN/PAYLOAD_TOO_LARGE`.
-- **Tests:** `DocumentControllerIT`, `DocumentServiceTxIT` (forced failure after the document write), `RagSchemaTest` (`AbstractPostgresTest`: column type, indexes, extension version), `JdbcOutboxStoreTest`.
+- **Owns:** `rag/ingest/DocumentController.java` (PUT, GET), `rag/ingest/DocumentService.java` (`@Transactional` upsert: document + outbox), `rag/ingest/JdbcDocumentStore.java`, `rag/ingest/JdbcOutboxStore.java` (claim SQL as in the LLD, lease and limit as parameters), `rag/ingest/DocumentWriteFilter.java` (PUT only: 403 for a non-admin key, 413 over the byte limit, 503 `overloaded` over the write cap, all before the body is read; D-47), `ErrorCode` additions if any, and tests.
+- **Codes against:** `DocumentUpsert`, `DocumentStore`, `OutboxStore`, `ApiKeyPrincipal.admin()`, `ErrorCode.FORBIDDEN/NOT_FOUND/PAYLOAD_TOO_LARGE/OVERLOADED`.
+- **Tests:** `DocumentControllerIT`, `DocumentServiceTxIT` (forced failure after the document write), `RagSchemaTest` (`AbstractPostgresTest`: column type, indexes, extension version), `JdbcOutboxStoreTest` (two concurrent claims never return the same job; an expired lease is claimable again), `DocumentWriteFilterTest`.
 - **Acceptance criteria:**
   - AC-t09-2: PUT with a non-admin key → 403; no rows written.
   - AC-t09-3: the document row and the outbox row are atomic: a forced failure after the document write leaves neither.
   - AC-t09-5: the embedding column type is `vector(768)`; inserting a 1,024-length vector fails.
   - AC-t09-9: `\d chunks` shows the HNSW index, the GIN index on the tsvector and the GIN index on ACL groups.
   - AC-t09-10: `SELECT extversion FROM pg_extension WHERE extname='vector'` ≥ 0.8.0, and the compose file pins a 0.8.x image tag.
-  - AC-t09-12: a document over the size limit → 413.
+  - AC-t09-12: a document over the size limit → 413, by `Content-Length` and also for a chunked body without one; no rows written.
+  - AC-t09-13: with `max-concurrent-writes` = 1 and one PUT held inside the transaction, a second PUT gets 503 `overloaded` with `Retry-After: 1`; after release, PUTs succeed again.
+  - AC-t09-14: `GET` returns 404 for a document of another tenant (same collection and doc id), never 403; an invalid id or group → 400 naming the field.
 
 ### Dev B: chunking, embedding, worker, corpus
-- **Owns:** `rag/ingest/HeadingParagraphSentenceChunker.java`, `rag/ingest/FakeEmbedder.java`, `rag/ingest/OllamaEmbedder.java`, `rag/ingest/IndexingWorker.java`, `rag/ingest/JdbcChunkStore.java`, `rag/RagProperties.java` (`gateway.rag`: embedder `fake|ollama`, chunk target 400, overlap 50, worker poll 1 s, batch 20), `scripts/corpus/fetch_corpus.py`, `scripts/corpus/load_corpus.py`, `data/corpus-manifest.txt` (Kubernetes website docs, English, one pinned commit, ~300 paths), `data/CORPUS_ATTRIBUTION.md`, owns `application.yml` and `application-test.yml` this round, and tests.
-- **Codes against:** `Chunker`, `Embedder`, `ChunkText`, `OutboxStore`, `DocumentStore`, `ChunkStore`, `TokenEstimator`.
-- **Tests:** `HeadingParagraphSentenceChunkerTest`, `IndexingWorkerTest` (in-memory stores, counting fake embedder), `OllamaEmbedderTest` (WireMock), `JdbcChunkStoreTest` (`AbstractPostgresTest`).
-- **B's final commit (after rebasing on A):** `IngestionE2EIT`: AC-t09-1 and AC-t09-4 through HTTP and the real worker.
+- **Owns:** `rag/ingest/HeadingParagraphSentenceChunker.java`, `rag/ingest/FakeEmbedder.java`, `rag/ingest/OllamaEmbedder.java`, `rag/ingest/IndexingWorker.java`, `rag/ingest/JdbcChunkStore.java`, `rag/RagProperties.java` (`gateway.rag`, D-47 defaults), `rag/RagConfig.java` (embedder choice, `@EnableScheduling`, worker conditional on `gateway.rag.worker.enabled`), `scripts/corpus/fetch_corpus.py`, `scripts/corpus/load_corpus.py`, `data/corpus-manifest.tsv` (path and groups per line, the pinned commit in a header comment), `data/CORPUS_ATTRIBUTION.md`, owns `application.yml` and `application-test.yml` this round (worker disabled under the test profile), and tests.
+- **Codes against:** `Chunker`, `Embedder`, `ChunkText`, `OutboxStore`, `DocumentStore`, `ChunkStore`, `IndexedDocument`, `TokenEstimator`, `support/OllamaEmbedJson`, `rag/chunker-fixture.md`.
+- **Tests:** `HeadingParagraphSentenceChunkerTest`, `FakeEmbedderTest`, `IndexingWorkerTest` (in-memory stores, counting fake embedder, worker driven by calling `pollOnce()`), `OllamaEmbedderTest` (WireMock), `JdbcChunkStoreTest` (`AbstractPostgresTest`), `scripts/tests/test_corpus.py` (front matter and shortcode stripping, path → doc id).
+- **B's final commit (after rebasing on A):** `IngestionE2EIT` (the only test class that enables the scheduled worker): AC-t09-1, -4 and -15 through HTTP and the real worker.
 - **Acceptance criteria:**
-  - AC-t09-1: PUT with an admin key → 202; within 10 s the document's chunk count is > 0 (fake embedder).
+  - AC-t09-1: PUT with an admin key → 202; within 10 s the document's status is `indexed` and its chunk count is > 0 (fake embedder).
   - AC-t09-4: every chunk row has the tenant id, collection and ACL groups of its document.
-  - AC-t09-6: chunker unit tests: no chunk above the max size; no chunk ends mid-sentence on the fixture; consecutive chunks overlap; the concatenated chunks cover the whole text.
-  - AC-t09-7: the worker calls the embedder once per batch, not once per chunk (fake counts calls).
-  - AC-t09-8: the Ollama adapter sends the model name and the `search_document:` prefix (WireMock asserts the request body) and rejects a response whose vector length ≠ 768.
-  - AC-t09-11: the fetch script downloads every manifest entry (HTTP 200 for all), and the count is between 250 and 350. *(reviewer runs it here; `raw.githubusercontent.com` is reachable)*
+  - AC-t09-6: chunker unit tests on the fixture: no chunk above the max size; no chunk ends mid-sentence ("e.g.", "i.e.", "Dr." and "1.2" are not sentence ends); consecutive chunks in a section overlap; the chunks cover the whole text; a heading starts a new chunk. A single sentence longer than the max is split on whitespace (separate test).
+  - AC-t09-7: the worker calls the embedder once per batch of at most `embed-batch-size` chunks, not once per chunk (fake counts calls and batch sizes; a 45-chunk document → 3 calls).
+  - AC-t09-8: the Ollama adapter posts to `/api/embed` with `model`, `input` as an array, `truncate: false`, and every input starting with `search_document: `; `embedQuery` uses `search_query: `; it rejects a response whose vector count differs from the input count or whose vector length ≠ 768; a non-2xx status with `{"error"}` becomes an embedding failure naming the status (WireMock asserts the bodies).
+  - AC-t09-11: the fetch script downloads every manifest entry at the pinned commit (HTTP 200 for all), and the count is between 250 and 350. *(reviewer runs it here; `raw.githubusercontent.com` is reachable)*
+  - AC-t09-15: the worker holds no database connection while the embedder runs: with the test pool of 3 and the fake embedder blocked inside a call, Hikari's active connections are 0 and three concurrent `GET`s succeed.
+  - AC-t09-16: the fake embedder is deterministic, unit length, and ignores the task prefix; two texts sharing most words score a higher cosine than two unrelated texts (D-47).
 
 ### Integration step
-Merge A, then B. `./gradlew clean test`; `python3 scripts/corpus/fetch_corpus.py && python3 scripts/corpus/load_corpus.py`; check `SELECT count(*) FROM chunks`. Indexing throughput here is labelled "fake embedder, not a model".
-- **Owner only:** index the corpus with real `nomic-embed-text`.
+Merge A, then B. `./gradlew clean build`; `python3 scripts/corpus/fetch_corpus.py && python3 scripts/corpus/load_corpus.py` against the app with the fake embedder; check `SELECT count(*), count(DISTINCT document_id) FROM chunks` and that every document is `indexed`. Indexing throughput here is labelled "fake embedder, not a model".
+- **Owner only:** index the corpus with real `nomic-embed-text` on the laptop (`ollama pull nomic-embed-text`, `gateway.rag.embedder=ollama`), and note the indexing time per document there.
 
 ---
 

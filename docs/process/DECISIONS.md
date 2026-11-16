@@ -83,6 +83,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-44 | R6 review rulings | `default`/`explicit` route labels; no tenant on routing counter; empty answers billed with reported usage; no remote schema loading; buffer bounded by `max_tokens` |
 | D-45 | Benchmark method (t08 prep) | k6 image, open vs closed load per scenario, TTFB as time to first token, summary file contract, mandatory hardware label, README numbers checked against files |
 | D-46 | t08 review: skip window, load shedding, rulings | Redis skip window shared by limiter/budget/cache; per-instance in-flight limit with 503 `overloaded`; heap per stream; schema gaps deferred |
+| D-47 | Ingestion details (t09 prep) | snake_case body, admin-only PUT and GET, write cap; bounded worker and embed batches; no connection held while embedding; Ollama `/api/embed` with task prefixes; word-hashing fake; pinned corpus |
 
 ---
 
@@ -673,4 +674,70 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - The scripted demo shows, in order: a 429 with `Retry-After`, a cache hit with its header, a fallback with the primary stopped, a schema-validated response, and the usage endpoint (`demo.sh`).
   - The measured table holds container-labelled numbers for every t08 scenario, each traced to the committed run file.
   - Owner part still open: laptop run and rows, Grafana screenshot, acceptance for t01–t08.
+
+### D-47. Ingestion, chunking and embedding details (t09 prep)
+- **Context:** C1, C4, C16, C17 and D-18 fix the shape: an outbox, `vector(768)`, tenant and groups on every chunk, a fake embedder here. Still open: the request contract, the heap and connection budget after the t08 finding (D-46: heap, not threads, bounds one instance), the exact Ollama request, how the fake behaves, and the corpus pin.
+- **API:**
+  - `PUT /v1/rag/collections/{collection}/documents/{docId}`, body `{"title", "content", "acl_groups"}`. Snake_case like every other gateway body (`max_tokens`, `/v1/usage`); the HLD's `aclGroups` is the one deviation. Unknown fields are ignored.
+  - Collection and doc ids match `[A-Za-z0-9][A-Za-z0-9._:-]{0,199}`: no slash, because Tomcat rejects an encoded slash in a path. The corpus maps a file path to dots (`concepts/workloads/controllers/job.md` → `concepts.workloads.controllers.job`).
+  - Groups: 1–20, each `[a-z0-9][a-z0-9_-]{0,63}`. An admin key may assign any group of its tenant (C16).
+  - 202 body `{"collection", "doc_id", "status": "queued"}`. `GET` on the same URL returns `{"collection", "doc_id", "title", "acl_groups", "status", "chunk_count", "content_hash", "updated_at"}`, never the content.
+  - Both PUT and GET need an admin key: a document's title and groups are not for a key that may not be allowed to read it. Another tenant's document is 404, never 403, so ids don't leak.
+- **Heap and admission:**
+  - The body limit is 1 MB of request bytes (`gateway.rag.max-document-bytes`), checked from `Content-Length` and by counting a chunked body, before parsing: 413.
+  - At most `gateway.rag.max-concurrent-writes` (4) PUTs per instance are past the filter at once. The next gets 503 `overloaded` with `Retry-After: 1`, like D-46. Without it, the 1,500 in-flight limit would admit 1,500 one-megabyte bodies (several GB as bytes, strings and JSON trees) into a 512 MB heap.
+  - Non-admin, too-large and over-cap PUTs are refused in `DocumentWriteFilter` before the body is read.
+- **Worker:**
+  - One scheduled poller per instance (`fixedDelay` 1 s, so polls never overlap). It claims at most 4 jobs with a 5-minute lease and handles them one at a time, so a lease covers the whole batch even on a slow laptop.
+  - Per job:
+    - read the document (one short connection);
+    - chunk it;
+    - embed in batches of at most 20 chunks (`embed-batch-size`), with no transaction open and no connection held;
+    - `replaceForDocument` (one transaction: delete, insert in JDBC batches of ≤ 100 rows, set status and count);
+    - `markDone`.
+  - Peak memory per job is about 10 MB for a 1 MB document (content, chunk text with overlap, ~1,000 vectors of 3 KB, one embed response). Corpus documents are at most 65 KB.
+  - t09 releases a failed job back to PENDING with the error. t11 adds the attempt limit, dead jobs, hash skip and stale-job skip.
+  - Vectors are bound as pgvector text (`CAST(? AS vector)`); no extra driver dependency.
+- **Connections:** ingestion adds three database paths and no Redis path.
+  - PUT: one transaction for two inserts.
+  - GET: one read.
+  - Worker: claim, read and swap, each short.
+  - Worst case on the default pool of 10: 4 PUT transactions and 1 worker transaction alongside request-log inserts and key lookups.
+  - Document writes are not rate-limited per tenant or budgeted (admin only, write cap per instance): a limitation, written in the README.
+  - AC-t09-15 proves the worker holds no connection while embedding, on the test pool of 3.
+- **Ollama embedder:**
+  - Source: the official docs (`docs/api.md`, "Generate Embeddings", ollama/ollama at db5266a7, read 2026-11-16).
+  - `POST {base}/api/embed` with `{"model": "nomic-embed-text", "input": [...], "truncate": false}`, JDK HttpClient (D-04), 60 s per batch.
+  - The response must hold one vector per input, each of 768 values; anything else fails the batch.
+  - `truncate: false`: the API's default (`true`) cuts over-long inputs silently, so a chunker bug would give vectors for text that isn't the chunk. An error is better; the chunk target is far below the model's context.
+  - `/api/embeddings` is documented as superseded and is not used.
+- **Task prefixes:** each chunk is embedded as `search_document: <title>\n\n<chunk text>` and each question as `search_query: <question>`.
+  - Source: the model's training and evaluation code, nomic-ai/contrastors at 613ddfd (`config.py` defaults `"search_query: "` and `"search_document: "`; the BEIR evaluation formats `search_query: {}` and `search_document: {}`). The model card on Hugging Face is not reachable from here.
+  - The title is embedded with each chunk so a chunk that says "it" still lands near its subject; it is stored separately, so the tsvector and citations are unaffected.
+- **Fake embedder (refines D-18):**
+  - Feature hashing of lower-cased word tokens into 768 signed buckets, L2-normalised; the task prefix is stripped first.
+  - Deterministic, and texts that share words score a higher cosine, so the vector leg returns plausible rows in t10 and t13 tests here.
+  - Every number produced with it is labelled "fake embedder, not a model".
+- **Chunking:**
+  - Headings first (a heading always starts a chunk, and the first chunk of a section begins with its heading line), then paragraphs, then sentences.
+  - Target 400, overlap 50, hard maximum 400 estimated tokens, using the shared `CharRatioTokenEstimator` (3 characters per token, so about 1,200 characters; real tokens are fewer, which errs small).
+  - Overlap is whole sentences from the end of the previous chunk in the same section.
+  - Code blocks stay whole when they fit, else split on lines.
+  - Only a single sentence longer than the maximum is split on whitespace.
+  - Sizes 200 and 800 are compared in t13.
+- **Corpus:**
+  - Source: `kubernetes/website` at `adaa04d017c75981660828f869b364a266b0ef53` (main on 2026-11-16).
+  - The manifest is every `.md` under `content/en/docs/concepts`, `tutorials` and `setup` at that commit: 256 files, 2.92 MB, largest 65 KB.
+  - Checked from here: all 256 return 200 from `raw.githubusercontent.com`, and `LICENSE` at that commit is CC BY 4.0.
+  - Files are fetched into the gitignored `data/corpus/`; nothing of the content is committed.
+  - The loader strips Hugo front matter (taking the title from it) and shortcode tags, and assigns groups per section: concepts `eng`; tutorials `eng`, `support`; setup `eng`, `finance`. So the demo keys see different subsets (C16, t12).
+  - The README states the source, commit, licence and the changes made (CC BY 4.0 requires saying the material was modified).
+- **Tests:** only `IngestionE2EIT` enables the scheduled worker (`gateway.rag.worker.enabled`, off under the test profile). Every cached context would otherwise run its own poller against the shared outbox and take other tests' jobs. Other tests call `pollOnce()`.
+- **Rejected:**
+  - Embedding inside the request (C4).
+  - One embed call per document (an unbounded request and response for a large document).
+  - Claiming 20 jobs as in the LLD (a 5-minute lease cannot cover 20 slow documents in series).
+  - A per-tenant ingestion rate limit now (no need at demo scale; noted).
+  - `pgvector-java` (text binding is enough).
+  - Embedding chunks without the title.
 

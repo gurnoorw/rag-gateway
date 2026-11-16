@@ -44,7 +44,7 @@ public final class MetricNames {
     // t05
     /** Counter. Tags: result (hit/miss/bypass/not_eligible). */
     public static final String CACHE_LOOKUPS = "gateway.cache.lookups";
-    /** Counter. Tags: operation (get/put/lock). Redis errors swallowed by the cache. */
+    /** Counter. Tags: operation (get/put/lock/unlock). Redis errors swallowed by the cache. */
     public static final String CACHE_ERRORS = "gateway.cache.errors";
 
     // t06

@@ -48,6 +48,18 @@ public class MetricsConfig {
     /** Used by {@code RequestLogWriter} too: Micrometer keeps the first description registered for a name. */
     public static final String REQUEST_LOG_WRITE_FAILURES_DESCRIPTION = "Request-log inserts that failed";
 
+    /** Shared with {@code CacheFilter}, which records one lookup per request through it (t05). */
+    public static final String CACHE_LOOKUPS_DESCRIPTION = "Response-cache lookups by result";
+
+    /** For the cache store's own registration of the same counter (t05, D-17). */
+    public static final String CACHE_ERRORS_DESCRIPTION = "Response-cache Redis errors, failed open";
+
+    /** {@code result} values of {@code gateway.cache.lookups}: one per {@code CacheStatus}, lower case. */
+    public static final List<String> CACHE_LOOKUP_RESULTS = List.of("hit", "miss", "bypass", "not_eligible");
+
+    /** {@code operation} values of {@code gateway.cache.errors} (D-40). */
+    public static final List<String> CACHE_ERROR_OPERATIONS = List.of("get", "put", "lock", "unlock");
+
     @Bean
     RequestMetricsListener requestMetricsListener(MeterRegistry registry, CostCalculator costs,
                                                   GatewayProperties properties) {
@@ -95,5 +107,13 @@ public class MetricsConfig {
         Counter.builder(MetricNames.REQUEST_LOG_WRITE_FAILURES)
                 .description(REQUEST_LOG_WRITE_FAILURES_DESCRIPTION)
                 .register(registry);
+        for (String result : CACHE_LOOKUP_RESULTS) {
+            Counter.builder(MetricNames.CACHE_LOOKUPS).description(CACHE_LOOKUPS_DESCRIPTION)
+                    .tag("result", result).register(registry);
+        }
+        for (String operation : CACHE_ERROR_OPERATIONS) {
+            Counter.builder(MetricNames.CACHE_ERRORS).description(CACHE_ERRORS_DESCRIPTION)
+                    .tag("operation", operation).register(registry);
+        }
     }
 }

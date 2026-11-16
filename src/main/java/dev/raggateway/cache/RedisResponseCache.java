@@ -3,6 +3,7 @@ package dev.raggateway.cache;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.raggateway.metrics.MetricNames;
+import dev.raggateway.metrics.MetricsConfig;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -136,7 +137,7 @@ public class RedisResponseCache implements ResponseCache {
 
     private static Counter errorCounter(MeterRegistry registry, String operation) {
         return Counter.builder(MetricNames.CACHE_ERRORS)
-                .description("Response cache Redis errors swallowed by failing open")
+                .description(MetricsConfig.CACHE_ERRORS_DESCRIPTION)
                 .tag("operation", operation)
                 .register(registry);
     }

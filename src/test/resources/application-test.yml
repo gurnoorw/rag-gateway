@@ -18,6 +18,13 @@ gateway:
       api-key: test-key-not-secret
     ollama:
       base-url: http://127.0.0.1:9
+  # RAG (t09, D-18, D-47): the fake embedder (Ollama is not reachable here), and no scheduled worker: every cached
+  # context would poll the shared outbox and take other tests' jobs. Tests call IndexingWorker.pollOnce(); only
+  # IngestionE2EIT turns the poller on.
+  rag:
+    embedder: fake
+    worker:
+      enabled: false
 logging:
   level:
     org.testcontainers: WARN

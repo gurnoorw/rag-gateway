@@ -268,11 +268,22 @@ Merge A, then B. `./gradlew clean test`; `docker compose --profile obs up -d`; a
 
 **Design.** `CacheFilter` (order `CACHE`, before the limiter, C3) computes `SHA-256` over canonical JSON of tenant, resolved model, messages, temperature, top_p, max tokens, stop and schema (not `stream`, D-14). Only `temperature == 0` and no bypass header are eligible (D-05). A hit replays through the client sink with zero usage; a miss takes a short `SET NX PX` lock, calls `chain.next` with a buffering sink and stores the result on completion only if it ended with `stop`/`length`, came from the selected provider (C21) and was not invalid (C8). Waiters poll the cache until the lock TTL, then call through. Everything fails open. LLD: "Response cache". Decisions: C3, C21, D-05, D-17.
 
-**Round prep:** none.
+**Round prep (reviewer, done):** contracts `cache/CacheKeyStrategy` (key computed after model selection; what is in and out of the key; `cache:v1:` prefix), `cache/CacheProperties` (`gateway.cache`: enabled, ttl 6 h, lock-ttl 10 s, poll-interval 50 ms), and `ResponseCache` made exact: `tryLock` returns a lock token (empty when another request holds the lock, `FAILED_OPEN` on a Redis error) and `unlock(key, token)` releases only the caller's own lock. Test fake `support/InMemoryResponseCache` (TTL, exclusive locks, fail-open switch, call counts). No migration.
+
+**Rules from earlier rulings (D-40), both developers:**
+- **Where:** `CacheFilter` at `FilterOrder.CACHE`: after model selection (key holds the resolved model, AC-t06-8), before the rate limiter (a hit spends no tokens, never touches the bucket or the budget, AC-t05-10, AC-t02-8).
+- **Eligible:** cache enabled, `temperature` exactly 0 (D-05: the caller's opt-in), and no `X-Gateway-Cache-Bypass: true` (`ctx.cacheBypassRequested()`, set by the edge since t01). Set `ctx.setCacheStatus(NOT_ELIGIBLE | BYPASS | HIT | MISS)` in every case; the client sinks already put it in `X-Gateway-Cache` and the log row's `cache_status`, and name the provider `cache` on a hit.
+- **Hit:** `sink.onToken(content)` once, then `sink.onComplete(new Completion(finishReason, Usage.ZERO, model))`; no `chain.next`, no attempt recorded (cost 0, log row provider `cache`).
+- **Store only when all hold:** the stream completed (`onComplete` reached the filter's wrapper), finish reason `stop` or `length` (not `content_filter`), `!ctx.fallbackUsed()` (C21), and the serving attempt `SUCCEEDED` with the selected model. Never on error, client disconnect, partial stream or invalid output (t07 never calls `onComplete` for those). Put **after** `super.onComplete(...)`, so the client's stream is closed first.
+- **Single-flight:** on a miss, `tryLock(key, lockTtl)`. Holder (a token, including `FAILED_OPEN`): `chain.next` with the buffering wrapper, `unlock(key, token)` in `finally`. Not holder (empty): loop every `pollInterval`: `get` → hit (replay, status `HIT`); else `tryLock` → token (become the holder: the previous holder failed or finished without storing); give up after `lockTtl` and call through without a lock. Record the time spent waiting with `ctx.addWaitNanos(...)` so it is not gateway overhead (D-39).
+- **Redis down:** get = miss, put ignored, `tryLock` = `FAILED_OPEN`; counted in `gateway.cache.errors{operation=get|put|lock|unlock}`; a request never waits on a dead Redis.
+- **Metrics:** `gateway.cache.lookups{result=hit|miss|bypass|not_eligible}` (one per request through the filter) and `gateway.cache.errors{operation}`. Both are fixed-label counters: Dev B adds them to `MetricsConfig.registerZeroCounters` (D-38) and the cache panel (hit ratio, errors) to the dashboard; `DashboardMetricsIT` must stay green.
+
+
 
 ### Dev A: store and key
-- **Owns:** `cache/RedisResponseCache.java`, `cache/CacheKeys.java`, `cache/CacheProperties.java` (`gateway.cache`: enabled, ttl 6 h, lock-ttl 10 s, poll 50 ms), and tests.
-- **Codes against:** `ResponseCache`, `CachedResponse`, `ChatRequest`, `MetricNames.CACHE_ERRORS`.
+- **Owns:** `cache/RedisResponseCache.java` (JSON value, `SET key value PX ttl`; lock `SET lock:<key> <token> NX PX lockTtl` with a random token returned to the caller; `unlock(key, token)` deletes only if the value still equals the token, in one small Lua script, so an expired-and-retaken lock is never deleted by the old holder), `cache/CanonicalJsonCacheKeys.java` (implements `CacheKeyStrategy`), and tests.
+- **Codes against:** `ResponseCache`, `CacheKeyStrategy`, `CacheProperties`, `CachedResponse`, `ChatRequest`, `MetricNames.CACHE_ERRORS`.
 - **Tests:** `CacheKeysTest`, `RedisResponseCacheTest` (`AbstractRedisTest`; TTL; lock exclusivity; Redis down → miss and counter).
 - **Acceptance criteria:**
   - AC-t05-3: changing any one of model, a message, temperature, max tokens or response format → a miss (one test per field). *(key level)*
@@ -280,8 +291,8 @@ Merge A, then B. `./gradlew clean test`; `docker compose --profile obs up -d`; a
   - AC-t05-11: semantically equal JSON with different key order or whitespace in the request body gives the same cache key.
 
 ### Dev B: filter
-- **Owns:** `cache/CacheFilter.java`, adds the cache panel to `ops/grafana/dashboards/rag-gateway.json`, owns `application.yml` this round, and tests.
-- **Codes against:** `ResponseCache` (in-memory fake with lock semantics until A merges), `GatewayFilter`, `RequestContext.fallbackUsed()/cacheBypassRequested()`, `MetricNames.CACHE_LOOKUPS`.
+- **Owns:** `cache/CacheFilter.java`, edits `metrics/MetricsConfig.java` (zero counters only) and `ops/grafana/dashboards/rag-gateway.json` (cache panel), owns `application.yml` this round, and tests.
+- **Codes against:** `ResponseCache` (use `support/InMemoryResponseCache` until A merges), `CacheKeyStrategy` (a trivial test lambda until A merges), `CacheProperties`, `GatewayFilter`, `RequestContext.fallbackUsed()/cacheBypassRequested()/addWaitNanos()`, `MetricNames.CACHE_LOOKUPS`.
 - **Tests:** `CacheFilterTest` (fakes: eligibility, bypass, no-cache rules, single-flight with 50 threads).
 - **B's final commit (after rebasing on A):** `CacheE2EIT` with WireMock and real Redis: AC-t05-1, -2, -5, -6, -7, -9, -10.
 - **Acceptance criteria:**

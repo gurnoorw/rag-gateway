@@ -76,6 +76,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-37 | t03 review rulings | exhausted chain = 503; 401/403/404 are configuration faults that move on; Claude header wait on a virtual thread; Ollama drain; test-base breaker reset |
 | D-38 | Request metrics details | bounded label values; explicit histogram buckets; per-attempt tokens; zero series at startup; no duplicates of earlier metrics |
 | D-39 | t04 review rulings | overhead excludes provider time and deliberate waits; small test pools; first-increment rate gap documented; `$__rate_interval` |
+| D-40 | Cache details (t05 prep) | key after selection, `cache:v1:` prefix; store rules; single-flight with re-lock; fail open = go ahead; per-tenant entries |
 
 ---
 
@@ -531,4 +532,26 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - For `stream:false`, time to first token is when the first token entered the JSON buffer, not when the client got a byte; documented on the metric.
   - The log-write-failures description is now one constant used by both registrations.
 - **f. Compose project name.** `check_obs.sh` addresses Prometheus and Grafana by URL and never by project name, so it works with the default project name (`rag-gateway`, from `docker-compose.yml`). A custom `-p` is only for running two stacks side by side; the README uses the default.
+
+### D-40. Response cache details (t05 prep)
+- **Context:** the LLD cache stores whatever comes back and its stampede note is one line; C3, C21, D-05, D-17 and D-39 add constraints the filter must meet together.
+- **Decision:**
+  - The key (`CacheKeyStrategy`) is computed after model selection. It holds tenant, resolved model, messages, temperature, top_p, max tokens, stop and the canonicalised schema; it leaves out `stream`, `include_usage`, the key id and the request id. It is `cache:v1:` + SHA-256 of canonical JSON.
+  - Entries are per tenant: two keys of one tenant share entries, tenants never do.
+  - Only `temperature == 0` without the bypass header is eligible. Only a complete, non-fallback answer with finish reason `stop` or `length` from the selected model is stored, after the client's stream is closed.
+  - A miss takes a lock `SET lock:<key> <owner> NX PX 10s`. Waiters poll the cache and retry the lock every 50 ms, so a holder that failed hands over at once, and call through after the lock TTL. Their wait is recorded as a deliberate wait. Unlock deletes only the caller's own lock.
+  - `tryLock` returns a random token; `unlock(key, token)` deletes the lock only while it still holds that token.
+  - On any Redis error the cache is a miss, a put is dropped, and `tryLock` returns `FAILED_OPEN` ("go ahead").
+- **Reason:**
+  - Tenant in the key is the privacy boundary (HLD deep dive 3).
+  - The resolved model in the key stops `auto` requests that route differently from sharing answers.
+  - Storing only primary answers keeps a 1B fallback from being served for 6 h (C21).
+  - Re-trying the lock while waiting avoids the classic single-flight bug where everyone waits the full TTL after the leader failed.
+  - "Go ahead" on Redis errors keeps a dead Redis from adding the lock TTL to every request.
+- **Rejected:**
+  - A shared cross-tenant cache (higher hit rate, leaks answers).
+  - `stream` in the key (halves hits for no difference in content).
+  - Request coalescing in process memory (works only within one instance; Redis serves all instances).
+  - Caching refusals (`content_filter`): a refusal may depend on policy that changes.
+- **Consequences:** a stream longer than the lock TTL lets waiters call through, so very slow cold keys can still produce more than one provider call (bounded by the number of waiters). The cache key changes when the catalog maps a public name to a new upstream id only if the public name changes; an alias change needs a version bump of the prefix or a TTL wait (t05 notes, question 4).
 

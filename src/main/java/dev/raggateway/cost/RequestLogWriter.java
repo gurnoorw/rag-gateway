@@ -72,7 +72,8 @@ public final class RequestLogWriter implements RequestCompletionListener {
     public void onRequestFinished(RequestContext ctx) {
         Row row;
         try {
-            row = Row.of(ctx, nanoClock.getAsLong());
+            // Latency ends when the pipeline finished the request, not when this listener runs (D-31).
+            row = Row.of(ctx, ctx.finishNanos() >= 0 ? ctx.finishNanos() : nanoClock.getAsLong());
         } catch (RuntimeException e) {
             writeFailures.increment();
             log.warn("request log row not built for request {}: {}", ctx.requestId(), e.toString());

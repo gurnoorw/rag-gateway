@@ -29,6 +29,10 @@ public final class RequestContext {
     private boolean cacheBypassRequested;
     private final List<Attempt> attempts = new ArrayList<>();
     private long firstTokenNanos = -1;
+    private String currentProvider;
+    private String currentModel;
+    private boolean currentFallback;
+    private long finishNanos = -1;
     private RequestOutcome outcome;
     private ErrorCode errorCode;
     private int httpStatus;
@@ -78,6 +82,32 @@ public final class RequestContext {
 
     public void setCacheStatus(CacheStatus cacheStatus) { this.cacheStatus = Objects.requireNonNull(cacheStatus); }
 
+    /**
+     * Announce the provider attempt about to start, before the adapter is called (DECISIONS.md D-28). The
+     * client sink reads it when it commits headers at the first byte, so {@code X-Gateway-Provider},
+     * {@code X-Gateway-Model} and the body's {@code model} name the provider that is actually streaming,
+     * including a fallback (t03). Every terminal calls this once per attempt, then {@link #recordAttempt}
+     * when the attempt ends.
+     *
+     * @param provider provider name, e.g. {@code claude}
+     * @param model    public model name sent to that provider
+     * @param fallback true when this is not the provider model selection chose
+     */
+    public void startAttempt(String provider, String model, boolean fallback) {
+        this.currentProvider = Objects.requireNonNull(provider, "provider");
+        this.currentModel = Objects.requireNonNull(model, "model");
+        this.currentFallback = fallback;
+    }
+
+    /** Provider of the attempt in progress (or the last one started), or null before any attempt. */
+    public String currentProvider() { return currentProvider; }
+
+    /** Public model name of the attempt in progress (or the last one started), or null. */
+    public String currentModel() { return currentModel; }
+
+    /** Whether the attempt in progress is a fallback. */
+    public boolean currentAttemptIsFallback() { return currentFallback; }
+
     /** Record one provider attempt. Called by the terminal once per attempt, in order. */
     public void recordAttempt(Attempt attempt) { attempts.add(Objects.requireNonNull(attempt)); }
 
@@ -111,12 +141,24 @@ public final class RequestContext {
 
     public boolean firstTokenSent() { return firstTokenNanos >= 0; }
 
-    /** Set by the pipeline when the request ends. */
+    /** Set by the pipeline when the request ends; the end time is now. */
     public void finish(RequestOutcome outcome, ErrorCode errorCode, int httpStatus) {
+        finish(outcome, errorCode, httpStatus, System.nanoTime());
+    }
+
+    /**
+     * Set by the pipeline when the request ends, after the response was written and closed. The end time is
+     * frozen here so every completion listener (log row, metrics) reports the same latency (D-31).
+     */
+    public void finish(RequestOutcome outcome, ErrorCode errorCode, int httpStatus, long finishNanos) {
         this.outcome = Objects.requireNonNull(outcome);
         this.errorCode = errorCode;
         this.httpStatus = httpStatus;
+        this.finishNanos = finishNanos;
     }
+
+    /** {@link System#nanoTime()} when the request finished, or -1 before {@link #finish}. */
+    public long finishNanos() { return finishNanos; }
 
     /** Null until the pipeline finished the request. */
     public RequestOutcome outcome() { return outcome; }

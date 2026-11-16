@@ -5,6 +5,8 @@ import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.Timeout;
 import dev.raggateway.config.GatewayProperties;
 import dev.raggateway.config.GatewayProperties.ProviderProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,6 +33,8 @@ import java.time.Duration;
 @ConditionalOnProperty(prefix = "gateway.providers.claude", name = "base-url")
 public class ClaudeClientConfig {
 
+    private static final Logger log = LoggerFactory.getLogger(ClaudeClientConfig.class);
+
     /** Placeholder sent when no key is configured, so the app starts and an upstream 401 says why. */
     static final String NO_KEY = "unset";
     /** Header the Messages API reads an API key from. */
@@ -48,7 +52,12 @@ public class ClaudeClientConfig {
 
     /** Builds the SDK client from provider properties. Also used by the adapter tests. */
     public static AnthropicClient client(ProviderProperties p) {
-        String key = p.apiKey() == null || p.apiKey().isBlank() ? NO_KEY : p.apiKey();
+        boolean blank = p.apiKey() == null || p.apiKey().isBlank();
+        if (blank) {
+            log.warn("gateway.providers.claude.api-key is empty (GATEWAY_CLAUDE_API_KEY): Claude calls will fail "
+                    + "with 502 provider_error until a key is set (D-30)");
+        }
+        String key = blank ? NO_KEY : p.apiKey();
         Duration connect = p.connectTimeout() != null ? p.connectTimeout() : Duration.ofSeconds(1);
         Duration read = p.idleTimeout() != null ? p.idleTimeout() : Duration.ofSeconds(30);
         return AnthropicOkHttpClient.builder()

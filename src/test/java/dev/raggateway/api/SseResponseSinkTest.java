@@ -139,6 +139,20 @@ class SseResponseSinkTest {
     }
 
     @Test
+    void announcedAttemptIsReportedEvenWhenItIsAFallback() {
+        var ctx = ctx(false);
+        // Primary failed before any token, the router announced the fallback, which then streams (D-28).
+        ctx.recordAttempt(new Attempt("claude", "claude-haiku-5-5", false, AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN,
+                Usage.ZERO, true, 1, -1, "HTTP_STATUS"));
+        ctx.startAttempt("ollama", "llama3.2:1b", true);
+        sink(ctx).onToken("x");
+
+        assertThat(response.getHeader(GatewayHeaders.PROVIDER)).isEqualTo("ollama");
+        assertThat(response.getHeader(GatewayHeaders.MODEL)).isEqualTo("llama3.2:1b");
+        assertThat(response.body()).contains("\"model\":\"llama3.2:1b\"");
+    }
+
+    @Test
     void failedEarlierAttemptIsNotReportedAsTheServer() {
         var ctx = ctx(false);
         ctx.recordAttempt(new Attempt("ollama", "local-llama", false, AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN,

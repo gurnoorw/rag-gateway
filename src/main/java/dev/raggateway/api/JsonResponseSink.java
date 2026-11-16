@@ -157,7 +157,9 @@ public class JsonResponseSink implements StreamSink {
      * Provider and model reported to the client ({@code X-Gateway-Provider}/{@code X-Gateway-Model} and the
      * body's {@code model}).
      *
-     * <p>Resolution: a cache hit is served by {@code cache} with the request's model. Otherwise a
+     * <p>Resolution: a cache hit is served by {@code cache} with the request's model. Otherwise the attempt the
+     * terminal announced with {@link RequestContext#startAttempt} (D-28). Otherwise (a terminal that did not
+     * announce, kept as a fallback path) a
      * successful serving attempt already recorded in the context wins (for example when output was
      * validated before being replayed, t07). Otherwise, while the serving attempt is still running, the
      * model is the one reported in the completion if known, else the resolved request model, and the
@@ -167,6 +169,8 @@ public class JsonResponseSink implements StreamSink {
 
         static ServedBy resolve(RequestContext ctx, GatewayProperties properties, String completionModel) {
             if (ctx.cacheStatus() == CacheStatus.HIT) return new ServedBy("cache", ctx.request().model());
+            // The attempt the terminal announced before streaming (D-28): right even for a fallback (t03).
+            if (ctx.currentProvider() != null) return new ServedBy(ctx.currentProvider(), ctx.currentModel());
             Optional<Attempt> succeeded = ctx.servingAttempt().filter(a -> a.outcome() == AttemptOutcome.SUCCEEDED);
             if (succeeded.isPresent()) return new ServedBy(succeeded.get().provider(), succeeded.get().model());
             String model = completionModel != null ? publicName(properties, completionModel) : ctx.request().model();

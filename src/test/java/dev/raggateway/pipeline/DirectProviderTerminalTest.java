@@ -25,7 +25,7 @@ class DirectProviderTerminalTest {
     private final DirectProviderTerminal terminal =
             new DirectProviderTerminal(List.of(claude), new CharRatioTokenEstimator());
 
-    static final class RecordingSink implements StreamSink {
+    static class RecordingSink implements StreamSink {
         final List<Object> events = new ArrayList<>();
 
         @Override
@@ -82,6 +82,41 @@ class DirectProviderTerminalTest {
             assertThat(a.firstTokenNanos()).isEqualTo(-1);
             assertThat(a.errorKind()).isEqualTo("HTTP_STATUS");
         });
+    }
+
+    @Test
+    void upstream401Or403IsTheGatewaysCredentialProblemSoProviderErrorNot400() {
+        for (int status : new int[]{401, 403}) {
+            RequestContext ctx = DefaultGatewayPipelineTest.ctx(false);
+            var sink = new RecordingSink();
+            claude.enqueue(FakeLlmProvider.failBeforeFirstToken(status));
+
+            terminal.call(ctx, sink);
+
+            assertThat(sink.events).singleElement().isInstanceOfSatisfying(GatewayException.class,
+                    e -> assertThat(e.code()).isEqualTo(ErrorCode.PROVIDER_ERROR));
+        }
+    }
+
+    @Test
+    void terminalAnnouncesTheAttemptBeforeStreaming() {
+        RequestContext ctx = DefaultGatewayPipelineTest.ctx(false);
+        var seen = new String[2];
+        var sink = new RecordingSink() {
+            @Override
+            public void onToken(String text) {
+                seen[0] = ctx.currentProvider();
+                seen[1] = ctx.currentModel();
+                super.onToken(text);
+            }
+        };
+        claude.enqueue(FakeLlmProvider.reply("hi"));
+
+        terminal.call(ctx, sink);
+
+        assertThat(seen[0]).isEqualTo(claude.name());
+        assertThat(seen[1]).isEqualTo(ctx.request().model());
+        assertThat(ctx.currentAttemptIsFallback()).isFalse();
     }
 
     @Test

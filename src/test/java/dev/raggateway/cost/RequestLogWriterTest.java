@@ -73,7 +73,7 @@ class RequestLogWriterTest extends AbstractPostgresTest {
                 new Usage(12, 34), false, 300 * MS, 80 * MS, null));
         ctx.markFirstTokenSent(1_100 * MS);
         ctx.setCacheStatus(CacheStatus.MISS);
-        ctx.finish(RequestOutcome.SUCCESS, null, 200);
+        ctx.finish(RequestOutcome.SUCCESS, null, 200, 1_450 * MS);
         var writer = new RequestLogWriter(jdbc, registry, () -> 1_450 * MS);
 
         writer.onRequestFinished(ctx);

@@ -61,6 +61,7 @@ public final class DirectProviderTerminal implements Terminal {
             return;
         }
 
+        ctx.startAttempt(provider.name(), request.model(), false);
         var observer = new AttemptSink(sink, nanoClock);
         long start = nanoClock.getAsLong();
         try {
@@ -99,7 +100,9 @@ public final class DirectProviderTerminal implements Terminal {
 
     static GatewayException toGatewayException(LlmProvider provider, ProviderException e) {
         int status = e.httpStatus();
-        if (!e.retryable() && status >= 400 && status < 500) {
+        // 401/403 from the provider mean the gateway's own credential is wrong or lacks access: the caller cannot
+        // fix that, so it is a 502, not the caller's 400 (D-30).
+        if (!e.retryable() && status >= 400 && status < 500 && status != 401 && status != 403) {
             return new GatewayException(ErrorCode.UPSTREAM_REJECTED,
                     "provider " + provider.name() + " rejected the request (HTTP " + status + ")", e);
         }

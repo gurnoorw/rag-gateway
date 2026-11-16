@@ -216,23 +216,19 @@ class RateLimitFilterTest {
         assertThat(ledger.adds).hasValue(0);
     }
 
-    /**
-     * The t01 direct terminal records a failure before the first token with estimated usage (input estimate,
-     * no output), and D-33 bills every attempt's usage, so the refund is the reservation minus the input
-     * estimate. AC-t02-5 ("full reservation refunded") holds only for an attempt recorded with zero usage;
-     * the conflict is raised for a ruling in the branch notes.
-     */
+    /** AC-t02-5 through the real t01 terminal: an HTTP 500 before any token bills nothing (D-34), so all comes back. */
     @Test
-    void providerFailureThroughTheT01TerminalRefundsAllButTheEstimatedInput() {
+    void ac_t02_5_httpErrorBeforeFirstTokenThroughTheT01TerminalRefundsTheFullReservation() {
         var provider = new FakeLlmProvider("claude", Set.of(OPUS)).enqueue(FakeLlmProvider.failBeforeFirstToken(500));
         RequestContext ctx = ctx(1_000);
 
         ClientSink sink = run(ctx, new DirectProviderTerminal(List.of(provider), new CharRatioTokenEstimator()));
 
         assertThat(sink.events).containsExactly("error:provider_error");
-        assertThat(ctx.billedUsage()).isEqualTo(new Usage(INPUT_ESTIMATE, 0));
+        assertThat(ctx.billedUsage()).isEqualTo(Usage.ZERO);
         assertThat(limiter.refundCalls()).isEqualTo(1);
-        assertThat(limiter.tokens(TENANT)).isEqualTo(CAPACITY - INPUT_ESTIMATE);
+        assertThat(limiter.tokens(TENANT)).isEqualTo(CAPACITY);
+        assertThat(ledger.adds).hasValue(0);
     }
 
     @Test

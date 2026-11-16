@@ -25,8 +25,9 @@ import java.util.function.LongSupplier;
  *
  * <ul>
  *   <li>Success: records a {@link AttemptOutcome#SUCCEEDED} attempt with provider-reported usage.</li>
- *   <li>{@link ProviderException}: records a failed attempt (before or after the first token) with estimated
- *       usage, then emits {@code onError}: a non-retryable upstream 4xx is {@link ErrorCode#UPSTREAM_REJECTED}
+ *   <li>{@link ProviderException}: records a failed attempt, then emits {@code onError}. Usage: zero for an
+ *       HTTP error status before the first token (not billed by the provider, D-34), else estimated (input
+ *       estimate plus the text streamed so far); a non-retryable upstream 4xx is {@link ErrorCode#UPSTREAM_REJECTED}
  *       (400), anything else {@link ErrorCode#PROVIDER_ERROR} (502).</li>
  *   <li>{@link ClientDisconnectedException}: records a {@link AttemptOutcome#CLIENT_CANCELLED} attempt with
  *       estimated usage (input estimate plus the text streamed so far, C23) and rethrows it.</li>
@@ -119,7 +120,7 @@ public final class DirectProviderTerminal implements Terminal {
             // The provider reported usage before the failure (e.g. the final write to the client failed).
             usage = observer.completion.usage();
             estimated = false;
-        } else if (outcome == AttemptOutcome.SUCCEEDED) {
+        } else if (outcome == AttemptOutcome.SUCCEEDED || billedNothing(outcome, errorKind)) {
             usage = Usage.ZERO;
             estimated = false;
         } else {
@@ -129,6 +130,18 @@ public final class DirectProviderTerminal implements Terminal {
         long firstToken = observer.firstTokenNanos < 0 ? -1 : observer.firstTokenNanos - start;
         return new Attempt(provider.name(), request.model(), false, outcome, usage, estimated, now - start,
                 firstToken, errorKind);
+    }
+
+    /**
+     * True for a provider that answered with an HTTP error status before any token: it returned an error
+     * instead of generating, and providers do not bill error responses, so the attempt costs nothing and the
+     * whole reservation goes back (DECISIONS.md D-34, AC-t02-5). A timeout or a broken connection before the
+     * first token is different: the provider may already have processed the prompt, so the input estimate
+     * is still charged and flagged as estimated.
+     */
+    static boolean billedNothing(AttemptOutcome outcome, String errorKind) {
+        return outcome == AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN
+                && ProviderException.Kind.HTTP_STATUS.name().equals(errorKind);
     }
 
     /** Observes one attempt: streamed text (for estimated usage), first-token time, completion. */

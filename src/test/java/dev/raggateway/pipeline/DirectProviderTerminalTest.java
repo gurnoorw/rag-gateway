@@ -77,8 +77,9 @@ class DirectProviderTerminalTest {
                 e -> assertThat(e.code()).isEqualTo(ErrorCode.UPSTREAM_REJECTED));
         assertThat(ctx.attempts()).singleElement().satisfies(a -> {
             assertThat(a.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN);
-            assertThat(a.usageEstimated()).isTrue();
-            assertThat(a.usage().outputTokens()).isZero();
+            // An error status before any token is not billed by the provider (D-34).
+            assertThat(a.usage()).isEqualTo(Usage.ZERO);
+            assertThat(a.usageEstimated()).isFalse();
             assertThat(a.firstTokenNanos()).isEqualTo(-1);
             assertThat(a.errorKind()).isEqualTo("HTTP_STATUS");
         });
@@ -117,6 +118,23 @@ class DirectProviderTerminalTest {
         assertThat(seen[0]).isEqualTo(claude.name());
         assertThat(seen[1]).isEqualTo(ctx.request().model());
         assertThat(ctx.currentAttemptIsFallback()).isFalse();
+    }
+
+    @Test
+    void connectionFailureBeforeFirstTokenStillChargesTheEstimatedInput() {
+        RequestContext ctx = DefaultGatewayPipelineTest.ctx(false);
+        claude.enqueue(FakeLlmProvider.script(new FakeLlmProvider.Fail(new ProviderException(
+                ProviderException.Kind.CONNECTION, "reset", true, 0, null, null))));
+
+        terminal.call(ctx, new RecordingSink());
+
+        // The provider may already have processed the prompt (D-34): input estimate, flagged as estimated.
+        assertThat(ctx.attempts()).singleElement().satisfies(a -> {
+            assertThat(a.outcome()).isEqualTo(AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN);
+            assertThat(a.usageEstimated()).isTrue();
+            assertThat(a.usage().inputTokens()).isPositive();
+            assertThat(a.usage().outputTokens()).isZero();
+        });
     }
 
     @Test

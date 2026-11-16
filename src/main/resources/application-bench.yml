@@ -1,0 +1,12 @@
+# Benchmark profile (t08, D-45): the app run by bench/run-all.sh with -Dspring.profiles.active=bench.
+# Providers are the WireMock mocks of the compose "mock" profile, on fixed ports. The base URLs are fixed on
+# purpose (no environment override): a GATEWAY_CLAUDE_BASE_URL left in the shell must never send a benchmark to
+# the real API. The key is a placeholder the mock ignores. Postgres and Redis are the compose services (the
+# application.yml defaults; scenario 6b overrides REDIS_HOST).
+gateway:
+  providers:
+    claude:
+      base-url: http://localhost:8081
+      api-key: bench-mock-key-not-a-secret
+    ollama:
+      base-url: http://localhost:8082

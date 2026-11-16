@@ -1,0 +1,139 @@
+{
+  "run_id": "20261116T2232Z-cloud-container-4-vcpu-15-gb",
+  "measured_on": "cloud container, 4 vCPU / 15 GB",
+  "date": "2026-11-16",
+  "git_commit": "0a5dc5913033",
+  "setup": {
+    "jvm_xmx": "512m",
+    "virtual_threads": true,
+    "mock_latency": "WireMock chunked dribble: first chunk (holding the first token) after 300 ms, then 10 more chunks every 100 ms, last at 1.3 s; scenario 7 uses a 5.1 s stream (first chunk at 300 ms, 25 chunks every 200 ms); scenario 7b holds the Claude response headers for 20 s",
+    "load_generator_shares_host": true,
+    "k6_image": "grafana/k6:2.3.0",
+    "price_date": "2026-11-16",
+    "notes": "scenario 1: a 20s gateway warm-up at 20/s ran first and is not reported | scenario 1: 11001 requests through the gateway and 11000 straight to the mock, each at 100/s for 110s (constant-arrival-rate); added latency = gateway minus direct, per percentile, k6 client-side (ttfb = http_req_waiting, total = http_req_duration); gateway processing overhead = gateway_overhead_seconds histogram over the gateway leg, interpolated within buckets (edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | scenario 1: the rate limiter or budget check failed open 0 times during the gateway leg (Redis command timeout 50 ms, D-17; Redis shares the CPUs) | scenario 8: gateway_requestlog_write_seconds over the scenario 1 gateway leg, interpolated within buckets (edges 0.5, 1, 2, 5, 10, 25, 50, 100 ms) | scenario 2: total time of responses marked X-Gateway-Cache: HIT, k6 client-side, open load 50/s over a warmed pool of 20 temperature-0 prompts; 0 responses in the load phase were not hits | scenario 3: hit rate from request_log.cache_status of the run's own tenant; response headers counted 481 hits, request_log 481 | scenario 4: SUM(request_log.cost_usd) / requests x 1,000 per run, one fresh tenant per run; baseline: 0 cache hits, 0 on claude-haiku-5-5, cache: 480 cache hits, 0 on claude-haiku-5-5, routing: 0 cache hits, 800 on claude-haiku-5-5, both: 480 cache hits, 800 on claude-haiku-5-5; list prices of 2026-11-16 | scenario 5: open load 20/s for 60s; mock-claude killed (docker kill, SIGKILL) at the stated second, the command took 297 ms; requests are classed by their start time; added latency = successful after-kill minus successful before-kill, per percentile, k6 client-side; 705 of 705 successful after-kill requests were served by ollama; 20 requests started before the kill failed (in flight when it happened) | scenario 6: open load 10/s for 120 s on a tenant with 20000 tokens/min; request_log: 1032 rows with 429, 169 with 200, 0 other; k6 saw 1032 429s; admitted tokens/min = billed input+output tokens of 200 rows logged from second 60 to 120 after the first row (the bucket starts full, so the first minute also admits the initial capacity) | scenario 6b refused: 2986 requests started, 2986 completed with [DONE], 0 ended at k6's 60 s request timeout with no response, 0 were still running when k6's 60 s graceful stop ended; k6 dropped 14 scheduled arrivals (no free VU, so the arrival rate was not held) | scenario 6b blackholed: 1657 requests started, 271 completed with [DONE], 1385 ended at k6's 60 s request timeout with no response, 1 were still running when k6's 60 s graceful stop ended; k6 dropped 1344 scheduled arrivals (no free VU, so the arrival rate was not held); the p50/p95/p99 added latency is capped by that timeout (a lower bound: those requests waited at least that long) | scenario 6b: the scenario 1 gateway load at 100/s for 30s, app started with Redis stopped (refused) and with REDIS_HOST=172.17.255.254 (a connect attempt timed out after 1.0 s with no answer: black-holed); added = total time (http_req_duration, every request that ended, k6 timeouts included) minus scenario 1's gateway leg, per percentile, k6 client-side; errors = requests started minus requests completed with [DONE] | scenario 7 N=500: 2000 streams started, 0 not completed; 48 heap samples, 12 thread dumps | scenario 7 N=1000: 4000 streams started, 0 not completed; 47 heap samples, 12 thread dumps | scenario 7 N=2000: 6163 streams started, 0 not completed; 39 heap samples, 13 thread dumps | scenario 7 N=4000: 4000 streams started, 4000 not completed; left out of runs because its peak heap and virtual threads could not be sampled: the app threw OutOfMemoryError (heap -Xmx512m); the app stopped answering and was restarted after the step; 3 heap/thread samples failed (5 heap samples and 1 thread dumps succeeded); 0 pinning traces in the step | scenario 7: closed model, constant-vus N for 20s per step, each VU holding one ~5.1 s stream at a time; app at -Xmx512m with -Djdk.tracePinnedThreads=short; errors = streams started minus streams completed with [DONE]; max_n_zero_errors is over every step run, including one left out of runs; peak heap = largest sum of jvm_memory_used_bytes{area=heap} sampled every 0.5 s; peak virtual threads = largest count in a jcmd thread dump taken every 2 s (jvm_threads_live counts platform threads only); pinned_reports = pinning trace headers printed during the step | scenario 7b: N=1000 for 30s, the Claude mock holds its headers for 20 s (first-token timeout 5 s); 12046 requests started, 12046 completed, 12046 served by ollama; 20 pinning traces, top frames: kotlin.SynchronizedLazyImpl.getValue(LazyJVM.kt:83) <== monitors:1 (x20)"
+  },
+  "scenarios": {
+    "overhead": {
+      "requests": 11001,
+      "arrival_rate_per_s": 100,
+      "added_latency_seen_by_client_ms": {
+        "ttfb": {
+          "p50": 1.74,
+          "p95": 3.52,
+          "p99": 5.231
+        },
+        "total": {
+          "p50": 1.817,
+          "p95": 3.914,
+          "p99": 16.39
+        }
+      },
+      "gateway_processing_overhead_ms": {
+        "p50": 1.65,
+        "p95": 4.482,
+        "p99": 6.081
+      }
+    },
+    "log_insert": {
+      "p50_ms": 0.773,
+      "p99_ms": 4.028,
+      "count": 11001
+    },
+    "cache_hit_latency": {
+      "p50_ms": 1.308,
+      "p95_ms": 1.861,
+      "p99_ms": 3.31,
+      "requests": 2000
+    },
+    "cache_hit_rate": {
+      "configured_repeat_share": 0.5,
+      "measured_hit_rate": 0.4805,
+      "requests": 1001,
+      "workload": "50/s for 20s, temperature 0; even arrivals repeat one of 20 pool prompts (cold at the start), odd arrivals are new prompts"
+    },
+    "cost_per_1k": {
+      "label": "modelled from list prices on a synthetic workload",
+      "baseline_usd": 7.72,
+      "cache_usd": 4.0144,
+      "routing_usd": 3.508,
+      "cache_and_routing_usd": 1.82416,
+      "requests_per_run": 1000,
+      "workload": "1000 requests per run at 50/s; 50 % repeats from a pool of 20 prompts; 20 % long prompts (3,000 input tokens), 80 % short (100); 250 output tokens each; baseline = claude-opus-5-5 at temperature 0.7, cache = temperature 0, routing = model auto"
+    },
+    "fallback": {
+      "primary_killed_at_s": 24.8,
+      "requests_after_kill": 705,
+      "success_rate_after_kill": 1.0,
+      "added_latency_ms": {
+        "p50": 2.038,
+        "p95": 4.16,
+        "p99": 15.655
+      }
+    },
+    "rate_limit": {
+      "over_limit_requests": 1032,
+      "with_429_and_retry_after": 1032,
+      "share_correct": 1.0,
+      "admitted_tokens_per_min": 19950.0,
+      "limit_tokens_per_min": 20000
+    },
+    "redis_down_from_start": {
+      "refused": {
+        "added_ms": {
+          "p50": 0.775,
+          "p95": 615.822,
+          "p99": 935.528
+        },
+        "requests": 2986,
+        "errors": 0
+      },
+      "blackholed": {
+        "added_ms": {
+          "p50": 58696.368,
+          "p95": 58691.62,
+          "p99": 58675.439
+        },
+        "requests": 1657,
+        "errors": 1386
+      }
+    },
+    "open_streams": {
+      "heap": "512m",
+      "stream_seconds": 5.1,
+      "max_n_zero_errors": 2000,
+      "runs": [
+        {
+          "n": 500,
+          "errors": 0,
+          "peak_heap_used_mb": 293.9,
+          "peak_virtual_threads": 760,
+          "pinned_reports": 16,
+          "pinned_top_frames": [
+            "kotlin.SynchronizedLazyImpl.getValue(LazyJVM.kt:83) <== monitors:1 (x16)"
+          ]
+        },
+        {
+          "n": 1000,
+          "errors": 0,
+          "peak_heap_used_mb": 510.0,
+          "peak_virtual_threads": 1382,
+          "pinned_reports": 0
+        },
+        {
+          "n": 2000,
+          "errors": 0,
+          "peak_heap_used_mb": 499.5,
+          "peak_virtual_threads": 3223,
+          "pinned_reports": 0
+        }
+      ],
+      "headers_delayed": {
+        "n": 1000,
+        "errors": 0,
+        "fallback_success_rate": 1.0,
+        "peak_heap_used_mb": 484.4,
+        "peak_virtual_threads": 2004
+      }
+    }
+  }
+}

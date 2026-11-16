@@ -143,7 +143,7 @@ for chunk in client.chat.completions.create(model="auto", stream=True,
 
 Errors are OpenAI-shaped JSON (`{"error":{"message","type","code","request_id"}}`) before the first byte, and an SSE `error` event after it. Main codes: 401 bad key, 400 invalid request, 403 `model_not_allowed`, 429 `rate_limited` (with `Retry-After`) or `budget_exceeded`, 502 `invalid_model_output`, 503 `all_providers_failed`.
 
-`bash scripts/demo.sh` runs the main behaviours end to end against the mock profile: a 429 with `Retry-After`, a cache hit, a fallback with the Claude mock stopped, a schema-validated answer and `/v1/usage`, printing what each step expects and what it got.
+`bash scripts/demo.sh` runs the main behaviours end to end against the mock profile: a 429 with `Retry-After`, a cache hit, a fallback with the Claude mock stopped, a schema-validated answer (and a non-conforming one retried once, then 502) and `/v1/usage`, printing what each step expects and what it got. It needs the mock stack and the app running (quickstart steps 1 and 2), creates its own demo tenants, and restarts the Claude mock when it ends.
 
 ## Designed for
 
@@ -263,8 +263,9 @@ Per-N open-stream rows (errors, peak heap, peak virtual threads, pinned-thread r
 ./gradlew clean build                                                   # unit + integration tests (Docker needed)
 bash bench/run-all.sh --measured-on "<hardware label>"                  # all scenarios; writes bench/summary/<run_id>.json
 python3 scripts/check_readme_numbers.py                                 # README measured table == run files
-bash scripts/quickstart_check.sh && bash scripts/demo.sh && bash scripts/check_mermaid.sh
-python3 -B -m unittest discover -s scripts/tests -v                        # tests of the checks themselves
+bash scripts/quickstart_check.sh && bash scripts/check_mermaid.sh        # clean clone; needs the default ports free
+bash scripts/demo.sh                                                    # with the mock stack and the app running
+python3 -B -m unittest discover -s scripts/tests -v                     # tests of the checks themselves
 ```
 
 `--measured-on` is required and has no default, so a run cannot be mislabelled. Raw k6 output stays in the gitignored `bench/results/`; the summary file is committed. The observability stack (`docker compose --profile obs up -d`) adds Prometheus and Grafana with the dashboard in `ops/grafana/dashboards/`.

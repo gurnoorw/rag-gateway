@@ -352,7 +352,8 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout):
         for f in failures.items:
             print(f"  {f}", file=out)
         return 1
-    print("OK: every measured value matches its run file", file=out)
+    print(f"OK: {len(checked_value_lines)} measured value(s) match their run files; "
+          f"{rows - len(checked_value_lines)} row(s) pending, with valid keys and labels", file=out)
     return 0
 
 

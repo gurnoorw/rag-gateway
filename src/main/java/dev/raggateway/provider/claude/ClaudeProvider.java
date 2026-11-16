@@ -2,6 +2,8 @@ package dev.raggateway.provider.claude;
 
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.core.http.Headers;
+import com.anthropic.core.http.HttpResponse;
+import com.anthropic.core.http.Interceptor;
 import com.anthropic.core.http.StreamResponse;
 import com.anthropic.errors.AnthropicException;
 import com.anthropic.errors.AnthropicInvalidDataException;
@@ -18,6 +20,7 @@ import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.models.messages.StopReason;
 import dev.raggateway.config.GatewayProperties;
 import dev.raggateway.config.GatewayProperties.ModelProperties;
+import dev.raggateway.config.GatewayProperties.ProviderProperties;
 import dev.raggateway.core.ChatRequest;
 import dev.raggateway.core.Completion;
 import dev.raggateway.core.FinishReason;
@@ -28,6 +31,7 @@ import dev.raggateway.pipeline.StreamSink;
 import dev.raggateway.provider.LlmProvider;
 import dev.raggateway.provider.ProviderException;
 import dev.raggateway.provider.ProviderException.Kind;
+import dev.raggateway.provider.StreamWatchdog;
 
 import java.io.UncheckedIOException;
 import java.time.Clock;
@@ -41,6 +45,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * Claude adapter on the official Anthropic Java SDK (DECISIONS.md D-04, D-05, D-06). A translation layer
@@ -59,26 +66,89 @@ import java.util.Objects;
  *       with {@code retry-after} parsed; other 4xx are not. I/O failures are {@link Kind#CONNECTION}.</li>
  *   <li>Cancel: when the sink throws {@link ClientDisconnectedException}, the {@link StreamResponse} is closed
  *       (which cancels the HTTP call and closes the socket) and the exception is rethrown unchanged.</li>
+ *   <li>Timeouts (t03): a {@link StreamWatchdog} per call. First token = the first {@code content_block_start}
+ *       of any block, thinking included (D-06): {@code message_start} and {@code ping} do not count. Idle gap =
+ *       time since the last event once content started. When it fires it closes the upstream call and the
+ *       adapter throws {@link Kind#FIRST_TOKEN_TIMEOUT} or {@link Kind#IDLE_TIMEOUT}, retryable.</li>
  * </ul>
  *
- * The first-token and idle watchdogs are added in t03; until then the SDK read timeout bounds a silent stream.
+ * <p><b>Waiting for the response headers.</b> The SDK's blocking {@code createStreaming} returns only once the
+ * headers arrive and gives no handle to cancel the call before that; closing the {@link StreamResponse} is only
+ * possible after. So the adapter adds an SDK {@link Interceptor}: for a call made by {@link #stream} it sends
+ * the request with {@code executeAsync} and waits on a future of its own, which the watchdog cancels. The
+ * adapter thread is free at the first-token deadline. The OkHttp call itself cannot be cancelled from there:
+ * the SDK cancels it only when its transport's own future is cancelled, and the interceptor sits above the
+ * SDK's logging layer, which hands out a derived future. So an abandoned call is closed the moment its
+ * headers arrive, and the socket read timeout (set here to first-token + idle, a backstop later than both
+ * watchdog deadlines, so the watchdog decides the error kind) bounds a call whose headers never come.
+ * <ul>
+ *   <li>Rejected: a per-request read timeout equal to the first-token timeout (it would also cap every gap
+ *       mid-stream at 5 s and kill a long thinking phase); interrupting the thread (does not unblock a socket
+ *       read on a platform thread); replacing the SDK transport to reach its own future (needs SDK-internal
+ *       backend wiring that the client builder normally does).</li>
+ *   <li>Cost: until the headers arrive the call runs on OkHttp's dispatcher, which admits 64 calls at once
+ *       (the SDK sets the per-host limit to the same value); more calls queue, and the queue time counts
+ *       towards the first-token timeout. The slot is released when the headers arrive.</li>
+ * </ul>
  */
 public final class ClaudeProvider implements LlmProvider {
 
     public static final String NAME = "claude";
 
+    static final Duration DEFAULT_FIRST_TOKEN_TIMEOUT = Duration.ofSeconds(5);
+    static final Duration DEFAULT_IDLE_TIMEOUT = Duration.ofSeconds(30);
+
+    /** The watchdog of the {@link #stream} call running on this thread, read by {@link #ABANDONABLE_REQUEST}. */
+    private static final ThreadLocal<StreamWatchdog> CALL_WATCHDOG = new ThreadLocal<>();
+
+    /**
+     * For a request made inside {@link #stream}: send it asynchronously and wait on a future the watchdog can
+     * cancel; a response that arrives after that is closed at once (see the class comment). Any other request
+     * passes through unchanged.
+     */
+    private static final Interceptor ABANDONABLE_REQUEST = Interceptor.syncOnly((delegate, httpRequest, options) -> {
+        StreamWatchdog watchdog = CALL_WATCHDOG.get();
+        if (watchdog == null) return delegate.execute(httpRequest, options);
+        CompletableFuture<HttpResponse> waiting = new CompletableFuture<>();
+        delegate.executeAsync(httpRequest, options).whenComplete((response, error) -> {
+            if (error != null) waiting.completeExceptionally(error);
+            else if (!waiting.complete(response)) response.close(); // abandoned: close the late response
+        });
+        watchdog.guard(() -> waiting.cancel(false));
+        try {
+            return waiting.join();
+        } catch (CancellationException e) {
+            throw new AnthropicIoException("Claude request abandoned before the response headers", e);
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new AnthropicIoException("Claude request failed", cause);
+        }
+    });
+
     private final AnthropicClient client;
     private final Map<String, ModelProperties> models;
     private final Clock clock;
+    private final Duration firstTokenTimeout;
+    private final Duration idleTimeout;
 
     public ClaudeProvider(AnthropicClient client, GatewayProperties properties) {
         this(client, properties, Clock.systemUTC());
     }
 
     ClaudeProvider(AnthropicClient client, GatewayProperties properties, Clock clock) {
-        this.client = Objects.requireNonNull(client, "client");
+        Objects.requireNonNull(client, "client");
         this.models = properties.models();
         this.clock = Objects.requireNonNull(clock, "clock");
+        ProviderProperties p = properties.providers().get(NAME);
+        this.firstTokenTimeout = p != null && p.firstTokenTimeout() != null ? p.firstTokenTimeout()
+                : DEFAULT_FIRST_TOKEN_TIMEOUT;
+        this.idleTimeout = p != null && p.idleTimeout() != null ? p.idleTimeout() : DEFAULT_IDLE_TIMEOUT;
+        // Socket read timeout: a backstop only, later than both watchdog deadlines. The connect timeout and
+        // every other client option stay as the client bean has them.
+        Duration backstop = firstTokenTimeout.plus(idleTimeout);
+        this.client = client.withOptions(o -> o.addInterceptor(ABANDONABLE_REQUEST)
+                .timeout(o.timeout().toBuilder().read(backstop).build()));
     }
 
     @Override
@@ -95,14 +165,32 @@ public final class ClaudeProvider implements LlmProvider {
     @Override
     public void stream(ChatRequest request, StreamSink sink) throws ProviderException {
         MessageCreateParams params = toParams(request);
-        var state = new StreamState();
-        try (StreamResponse<RawMessageStreamEvent> response = client.messages().createStreaming(params)) {
+        try (StreamWatchdog watchdog = StreamWatchdog.start(NAME, firstTokenTimeout, idleTimeout)) {
+            try {
+                streamGuarded(params, sink, watchdog);
+            } catch (ClientDisconnectedException e) {
+                throw e;
+            } catch (ProviderException | RuntimeException e) {
+                // The watchdog closed the call: whatever the read failed with, the cause is the timeout.
+                if (watchdog.fired()) throw watchdog.timeout(e);
+                throw e;
+            }
+        }
+    }
+
+    private void streamGuarded(MessageCreateParams params, StreamSink sink, StreamWatchdog watchdog)
+            throws ProviderException {
+        var state = new StreamState(watchdog);
+        try (StreamResponse<RawMessageStreamEvent> response = open(params, watchdog)) {
+            watchdog.guard(response::close);
             Iterator<RawMessageStreamEvent> events = response.iterator();
             while (events.hasNext()) {
                 RawMessageStreamEvent event = events.next();
                 if (state.accept(event, sink)) break;
             }
-            sink.onComplete(state.completion());
+            Completion completion = state.completion();
+            watchdog.close(); // the upstream stream is finished; a slow client write is not an upstream timeout
+            sink.onComplete(completion);
         } catch (AnthropicServiceException e) {
             throw fromServiceException(e);
         } catch (AnthropicIoException | AnthropicRetryableException | UncheckedIOException e) {
@@ -116,6 +204,16 @@ public final class ClaudeProvider implements LlmProvider {
         }
         // ClientDisconnectedException is not caught: try-with-resources has already closed the response
         // (cancelling the upstream call) when it leaves this method, unchanged (LlmProvider contract).
+    }
+
+    /** Sends the request; the watchdog can cancel it while this thread waits for the headers. */
+    private StreamResponse<RawMessageStreamEvent> open(MessageCreateParams params, StreamWatchdog watchdog) {
+        CALL_WATCHDOG.set(watchdog);
+        try {
+            return client.messages().createStreaming(params);
+        } finally {
+            CALL_WATCHDOG.remove();
+        }
     }
 
     /** Builds the Messages request. Package-private for tests. */
@@ -188,14 +286,22 @@ public final class ClaudeProvider implements LlmProvider {
 
     /** Accumulates usage, stop reason and model across the events of one stream. */
     private static final class StreamState {
+        private final StreamWatchdog watchdog;
         private boolean started;
         private long inputTokens;
         private long outputTokens;
         private String model;
         private String stopReason;
 
+        StreamState(StreamWatchdog watchdog) {
+            this.watchdog = watchdog;
+        }
+
         /** @return true when the stream is finished ({@code message_stop}) */
         boolean accept(RawMessageStreamEvent event, StreamSink sink) {
+            // First token = first content block of any kind (D-06); before it, other events do not count.
+            if (event.isContentBlockStart()) watchdog.contentStarted();
+            else watchdog.activity();
             if (event.isMessageStart()) {
                 RawMessageStartEvent start = event.asMessageStart();
                 started = true;
@@ -207,7 +313,10 @@ public final class ClaudeProvider implements LlmProvider {
                 // Only text deltas are forwarded; thinking and signature deltas are not (D-06).
                 if (delta.isText()) {
                     String text = delta.asText().text();
-                    if (!text.isEmpty()) sink.onToken(text);
+                    if (!text.isEmpty()) {
+                        sink.onToken(text);
+                        watchdog.activity(); // time spent writing to the client is not upstream silence
+                    }
                 }
             } else if (event.isMessageDelta()) {
                 RawMessageDeltaEvent md = event.asMessageDelta();

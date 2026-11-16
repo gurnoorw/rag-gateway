@@ -50,17 +50,17 @@ import java.util.function.LongSupplier;
  *       reached the client in that attempt (tokens cannot be un-sent). Wait: full jitter, or the upstream
  *       {@code Retry-After} up to a cap ({@link FullJitterBackoff}).</li>
  *   <li><b>Move to the next provider</b> only when {@link ProviderException#fallbackAllowed()}: a retryable
- *       failure after the retries, or an upstream 401/403 at once (the gateway's credential for this provider is
- *       wrong; another provider can still answer, D-30). An open breaker
+ *       failure after the retries, or at once for a provider configuration fault: 401/403/404 (wrong key, no
+ *       access, model not there; another provider can still answer, D-30, D-37). An open breaker
  *       ({@link CallNotPermittedException}) also moves on at once, with no adapter call and no attempt.</li>
- *   <li><b>Stop</b> on any other failure: a non-retryable 4xx (the request itself is invalid, AC-t03-6; an Ollama
- *       404 "model not pulled" falls here too), a failure after the first token (SSE error, AC-t03-3), or an
+ *   <li><b>Stop</b> on any other failure: a non-retryable 4xx other than a configuration fault (the request itself is
+ *       invalid, AC-t03-6), a failure after the first token (SSE error, AC-t03-3), or an
  *       adapter bug.</li>
  *   <li>Every step tried and failed (or skipped by an open breaker) → 503 {@code all_providers_failed}.</li>
  * </ul>
  *
  * <p>The breaker counts retryable failures (timeouts, connection errors, 429, 5xx, before or after the first
- * token) as failures; it ignores everything else: non-retryable 4xx including 401/403 (a configuration fault
+ * token) as failures; it ignores everything else: non-retryable 4xx including 401/403/404 (a configuration fault
  * that does not heal with time, so it must show up in logs and alerts rather than hide behind an open breaker),
  * client disconnects and adapter bugs. See {@link ResilienceConfig}.
  *
@@ -252,14 +252,15 @@ public final class FallbackRouter implements Terminal {
     }
 
     /**
-     * Client-facing error for a failure that stops the chain before the first token. A non-retryable 4xx other
-     * than 401/403 is the caller's request ({@link ErrorCode#UPSTREAM_REJECTED}, 400); anything else is
+     * Client-facing error for a failure that stops the chain before the first token. A non-retryable 4xx that is
+     * not a configuration fault (401/403/404) is the caller's request ({@link ErrorCode#UPSTREAM_REJECTED},
+     * 400); anything else is
      * {@link ErrorCode#PROVIDER_ERROR} (502). The provider's response body is never echoed (it may quote the
      * prompt).
      */
     static GatewayException toGatewayException(LlmProvider provider, ProviderException e) {
         int status = e.httpStatus();
-        if (!e.retryable() && status >= 400 && status < 500 && status != 401 && status != 403) {
+        if (!e.retryable() && status >= 400 && status < 500 && !e.configurationFault()) {
             return new GatewayException(ErrorCode.UPSTREAM_REJECTED,
                     "provider " + provider.name() + " rejected the request (HTTP " + status + ")", e);
         }

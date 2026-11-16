@@ -24,6 +24,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -57,8 +58,8 @@ import java.util.concurrent.ExecutionException;
  *       omits zero values, e.g. a fully cached prompt). A stream that ends without {@code done:true}, or a
  *       line that is not JSON, is {@link Kind#MALFORMED_RESPONSE} (retryable).</li>
  *   <li>Errors: an HTTP error status carries {@code {"error":"..."}}; 429 and 5xx are retryable (with
- *       {@code Retry-After} in seconds), any other 4xx is not. In particular 404 (model not pulled) is a
- *       configuration fault: not retryable, no fallback (D-07 amendment). An {@code {"error":...}} line inside
+ *       {@code Retry-After} in seconds), any other 4xx is not. 404 (model not pulled) is a configuration
+ *       fault: not retried, but the router may move on to the next provider (D-37). An {@code {"error":...}} line inside
  *       a 200 stream is classified like Claude's in-stream error event: {@link Kind#HTTP_STATUS} 500,
  *       retryable (only before the first token, which the router checks). Connection refused or reset is
  *       {@link Kind#CONNECTION}, a connect timeout {@link Kind#CONNECT_TIMEOUT}; both retryable.</li>
@@ -196,10 +197,26 @@ public final class OllamaProvider implements LlmProvider {
                 sink.onToken(content);
                 watchdog.activity(); // time spent writing to the client is not upstream silence
             }
-            if (node.path("done").asBoolean(false)) return completion(node, request);
+            if (node.path("done").asBoolean(false)) {
+                drain(body);
+                return completion(node, request);
+            }
         }
         throw new ProviderException(Kind.MALFORMED_RESPONSE, "Ollama stream ended without done:true", true, 0, null,
                 null);
+    }
+
+    /**
+     * Reads what is left after {@code done:true} (normally just the end of the chunked body), so the JDK client
+     * can return the connection to its pool instead of closing it. Bounded by the idle watchdog, which is still
+     * armed; an error here is ignored because the answer is already complete.
+     */
+    private static void drain(InputStream body) {
+        try {
+            body.transferTo(OutputStream.nullOutputStream());
+        } catch (IOException ignored) {
+            // the stream is complete; a failure to drain only costs connection reuse
+        }
     }
 
     private Completion completion(JsonNode done, ChatRequest request) {

@@ -270,8 +270,8 @@ class FallbackRouterTest {
     }
 
     @Test
-    void ollama404ModelNotPulledGetsNoRetryAndNoFallback() {
-        // The caller selected the local model; the next step would be Claude.
+    void ollama404ModelNotPulledIsNotRetriedButMovesOnToTheNextProvider() {
+        // The caller selected the local model; the next step is Claude (D-37: a configuration fault moves on).
         var fixture = new RouterFixture(List.of(claude, ollama), List.of(new ChainEntry("claude", OPUS)));
         claude.defaultScript(FakeLlmProvider.reply("claude"));
         ollama.enqueue(fail(httpError(404, false, null)));
@@ -280,9 +280,23 @@ class FallbackRouterTest {
 
         fixture.router.call(ctx, sink);
 
-        assertThat(sink.error().code()).isNotEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
-        assertThat(ollama.calls()).isEqualTo(1);
-        assertThat(claude.calls()).isZero();
+        assertThat(ollama.calls()).as("not retried").isEqualTo(1);
+        assertThat(claude.calls()).isEqualTo(1);
+        assertThat(ctx.fallbackUsed()).isTrue();
+        assertThat(fixture.breaker("ollama").getMetrics().getNumberOfBufferedCalls()).as("breaker ignores it").isZero();
+    }
+
+    @Test
+    void chainEndingInAConfigurationFaultIsStill503() {
+        // Ruling D-37: once the chain is exhausted the answer is 503, whatever the last failure was.
+        claude.defaultScript(FakeLlmProvider.failBeforeFirstToken(500));
+        ollama.defaultScript(fail(httpError(401, false, null)));
+        RequestContext ctx = ctx(OPUS);
+
+        Sink sink = run(ctx);
+
+        assertThat(sink.error().code()).isEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
+        assertThat(sink.error().getMessage()).contains("ollama: HTTP 401");
     }
 
     // ---- AC-t03-7 ----

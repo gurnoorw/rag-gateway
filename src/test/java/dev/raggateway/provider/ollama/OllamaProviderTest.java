@@ -208,7 +208,7 @@ class OllamaProviderTest {
     // ---- errors ----
 
     @Test
-    void http404ModelNotPulledIsNotRetryableAndAllowsNoFallback() {
+    void http404ModelNotPulledIsNotRetryableButIsAConfigurationFault() {
         stub(aResponse().withStatus(404).withHeader("Content-Type", "application/json")
                 .withBody(OllamaNdjson.errorBody("model \"llama3.2:1b\" not found, try pulling it first")));
 
@@ -218,7 +218,8 @@ class OllamaProviderTest {
         assertThat(e.kind()).isEqualTo(Kind.HTTP_STATUS);
         assertThat(e.httpStatus()).isEqualTo(404);
         assertThat(e.retryable()).isFalse();
-        assertThat(e.fallbackAllowed()).as("a configuration fault, not a provider outage").isFalse();
+        assertThat(e.configurationFault()).as("a configuration fault, not a provider outage").isTrue();
+        assertThat(e.fallbackAllowed()).as("another provider can still answer (D-37)").isTrue();
         assertThat(e).hasMessageContaining("not found");
     }
 

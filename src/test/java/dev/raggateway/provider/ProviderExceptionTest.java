@@ -13,14 +13,16 @@ class ProviderExceptionTest {
     }
 
     @Test
-    void retryableFailuresAndCredentialErrorsAllowFallbackOtherClientErrorsDoNot() {
+    void retryableFailuresAndConfigurationFaultsAllowFallbackOtherClientErrorsDoNot() {
         assertThat(http(500).fallbackAllowed()).isTrue();
         assertThat(http(429).fallbackAllowed()).isTrue();
         assertThat(http(401).fallbackAllowed()).isTrue();
         assertThat(http(403).fallbackAllowed()).isTrue();
         assertThat(http(401).retryable()).isFalse();
         assertThat(http(400).fallbackAllowed()).isFalse();
-        assertThat(http(404).fallbackAllowed()).isFalse();
+        assertThat(http(404).fallbackAllowed()).isTrue();
+        assertThat(http(404).configurationFault()).isTrue();
+        assertThat(http(422).fallbackAllowed()).isFalse();
         assertThat(new ProviderException(ProviderException.Kind.FIRST_TOKEN_TIMEOUT, "t", true, 0, null, null)
                 .fallbackAllowed()).isTrue();
     }

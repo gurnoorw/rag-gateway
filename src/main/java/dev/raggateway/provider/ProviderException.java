@@ -56,12 +56,18 @@ public final class ProviderException extends Exception {
     }
 
     /**
-     * Whether the router may move on to the next provider in the chain (t03, DECISIONS.md D-30): every
-     * retryable failure, plus an upstream 401 or 403, which means this provider's credential is missing or
-     * lacks access. That is not retried on the same provider (it would fail the same way) but another
+     * Whether the router may move on to the next provider in the chain (t03, DECISIONS.md D-30, D-37): every
+     * retryable failure, plus a provider configuration fault: 401/403 (this provider's credential is missing
+     * or lacks access) or 404 (the model is not there, e.g. not pulled into Ollama, or a retired model id).
+     * A configuration fault is not retried on the same provider (it would fail the same way) but another
      * provider can still answer. Any other 4xx means the request itself is invalid: no fallback (AC-t03-6).
      */
     public boolean fallbackAllowed() {
-        return retryable || httpStatus == 401 || httpStatus == 403;
+        return retryable || configurationFault();
+    }
+
+    /** Upstream 401, 403 or 404: the gateway's setup for this provider is wrong, not the caller's request. */
+    public boolean configurationFault() {
+        return httpStatus == 401 || httpStatus == 403 || httpStatus == 404;
     }
 }

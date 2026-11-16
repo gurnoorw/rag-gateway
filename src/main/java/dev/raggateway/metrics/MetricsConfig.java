@@ -45,6 +45,15 @@ public class MetricsConfig {
             Duration.ofMillis(25), Duration.ofMillis(50), Duration.ofMillis(100), Duration.ofMillis(250),
             Duration.ofMillis(500), Duration.ofSeconds(1));
 
+    /**
+     * {@code gateway.requestlog.write}: 0.5 ms … 100 ms (8 edges, plus +Inf), for the t08 log-insert cost
+     * (scenario 8, C7). A single-row insert on a warm pool is sub-millisecond to a few ms; the 2 s Hikari
+     * connection timeout lands in +Inf.
+     */
+    public static final List<Duration> LOG_WRITE_BUCKETS = List.of(
+            Duration.ofNanos(500_000), Duration.ofMillis(1), Duration.ofMillis(2), Duration.ofMillis(5),
+            Duration.ofMillis(10), Duration.ofMillis(25), Duration.ofMillis(50), Duration.ofMillis(100));
+
     /** Used by {@code RequestLogWriter} too: Micrometer keeps the first description registered for a name. */
     public static final String REQUEST_LOG_WRITE_FAILURES_DESCRIPTION = "Request-log inserts that failed";
 
@@ -85,6 +94,7 @@ public class MetricsConfig {
                 List<Duration> buckets = switch (id.getName()) {
                     case MetricNames.REQUEST_DURATION, MetricNames.TIME_TO_FIRST_TOKEN -> LATENCY_BUCKETS;
                     case MetricNames.GATEWAY_OVERHEAD -> OVERHEAD_BUCKETS;
+                    case MetricNames.REQUEST_LOG_WRITE -> LOG_WRITE_BUCKETS;
                     default -> null;
                 };
                 if (buckets == null) return config;

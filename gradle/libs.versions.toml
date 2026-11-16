@@ -1,0 +1,25 @@
+# Every version the build uses is pinned here (docs/process/DECISIONS.md, D-02).
+# The Spring Boot BOM pins what it manages (Jackson, Flyway, Lettuce, Micrometer, Testcontainers,
+# Caffeine, PostgreSQL JDBC, Awaitility...). Only libraries Boot does not manage get a version below.
+# Change a version only in this file, in its own commit, with the reason in the message.
+[versions]
+spring-boot = "3.5.16"            # last 3.x line; manages testcontainers 1.21.4, flyway 11.7.2, jackson 2.21.4, lettuce 6.6.0, micrometer 1.15.12
+resilience4j = "2.4.0"            # circuitbreaker + retry + micrometer only (D-07)
+anthropic-java = "3.3.0"          # official SDK; 3.x sends anthropic-version 2026-10-21 (D-05)
+json-schema-validator = "1.5.9"   # networknt, Jackson 2, draft 2020-12 (D-10)
+pgvector = "0.1.6"                # PGvector JDBC type
+wiremock = "3.13.2"               # standalone (shaded) jar, avoids Jetty clashes with Boot
+
+[libraries]
+spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
+resilience4j-bom = { module = "io.github.resilience4j:resilience4j-bom", version.ref = "resilience4j" }
+resilience4j-circuitbreaker = { module = "io.github.resilience4j:resilience4j-circuitbreaker" }
+resilience4j-retry = { module = "io.github.resilience4j:resilience4j-retry" }
+resilience4j-micrometer = { module = "io.github.resilience4j:resilience4j-micrometer" }
+anthropic-java = { module = "com.anthropic:anthropic-java", version.ref = "anthropic-java" }
+json-schema-validator = { module = "com.networknt:json-schema-validator", version.ref = "json-schema-validator" }
+pgvector = { module = "com.pgvector:pgvector", version.ref = "pgvector" }
+wiremock = { module = "org.wiremock:wiremock-standalone", version.ref = "wiremock" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }

@@ -12,6 +12,7 @@ import dev.raggateway.support.TestData;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.yaml.snakeyaml.Yaml;
@@ -53,6 +54,10 @@ import static org.awaitility.Awaitility.await;
  * {@code scripts/check_dashboard.py} applies the same rules to a running app. AC-t04-4 is checked on
  * {@code docker-compose.yml} itself; AC-t04-5 needs the compose stack and is {@code scripts/check_obs.sh}.
  */
+// Its own context (WireMock URLs). Every cached context holds a Hikari pool on the shared Postgres, whose default
+// max_connections (100) the suite already nearly fills; a small pool and closing the context after the class keep
+// this test from starving later ones ("too many clients already").
+@DirtiesContext
 class DashboardMetricsIT extends AbstractIntegrationTest {
 
     static final Path DASHBOARD = Path.of("ops/grafana/dashboards/rag-gateway.json");
@@ -97,6 +102,7 @@ class DashboardMetricsIT extends AbstractIntegrationTest {
     static void providersAtWireMock(DynamicPropertyRegistry registry) {
         registry.add("gateway.providers.claude.base-url", CLAUDE::baseUrl);
         registry.add("gateway.providers.ollama.base-url", OLLAMA::baseUrl);
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "2");
     }
 
     @AfterAll

@@ -256,14 +256,16 @@ class ChatEdgeIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void autoModelIs400WithMessage() throws Exception {
+    void autoIsResolvedBeforeTheTerminalAndTheRuleIsInTheHeader() throws Exception {
+        // t06 replaced t01's "auto is 400": the starting rule "short" sends a 1-token prompt to Haiku.
         var response = post("""
                 {"model":"auto","messages":[{"role":"user","content":"hi"}]}""", "Authorization", bearer(KEY_A));
 
-        assertError(response, 400, "invalid_request");
-        assertThat(JSON.readTree(response.body()).at("/error/message").asText())
-                .isEqualTo("automatic routing is not enabled");
-        assertThat(pipeline.terminalCalls).hasValue(0);
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue(GatewayHeaders.ROUTE_RULE)).hasValue("short");
+        assertThat(pipeline.terminalCalls).hasValue(1);
+        assertThat(pipeline.lastCtx.get().request().model()).isEqualTo("claude-haiku-5-5");
+        assertThat(pipeline.lastCtx.get().requestedModel()).isEqualTo("auto");
     }
 
     @Test

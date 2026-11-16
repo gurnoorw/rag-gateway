@@ -13,6 +13,7 @@ import dev.raggateway.error.ErrorCode;
 import dev.raggateway.error.GatewayException;
 import dev.raggateway.pipeline.FilterChain;
 import dev.raggateway.pipeline.StreamSink;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -24,7 +25,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** ExplicitModelSelector rules and how ModelSelectionFilter writes the result into the context. */
+/** How ModelSelectionFilter writes the selection into the context; the rules themselves are in RuleBasedModelSelectorTest. */
 class ModelSelectionFilterTest {
 
     private static final GatewayProperties PROPS = new GatewayProperties(1024, 8192,
@@ -43,7 +44,8 @@ class ModelSelectionFilterTest {
         }
     };
 
-    private final ExplicitModelSelector selector = new ExplicitModelSelector(PROPS);
+    private final RuleBasedModelSelector selector = new RuleBasedModelSelector(PROPS,
+            new RoutingProperties("claude-haiku-5-5", List.of(RoutingProperties.SHORT)), new SimpleMeterRegistry());
 
     static RequestContext ctx(String model) {
         var tenant = new Tenant("t1", "Tenant 1", 10_000, BigDecimal.TEN, Set.of());
@@ -54,25 +56,27 @@ class ModelSelectionFilterTest {
     }
 
     @Test
-    void catalogModelIsSelectedWithoutRule() {
-        assertThat(selector.select(ctx("claude-haiku-5-5").request(), null, 0))
-                .isEqualTo(new ModelSelection("claude-haiku-5-5", null));
+    void filterLeavesAnExplicitModelAndSetsNoRule() {
+        var filter = new ModelSelectionFilter(selector, ESTIMATOR);
+        var ctx = ctx("claude-haiku-5-5");
+        List<String> seen = new ArrayList<>();
+
+        new FilterChain(List.of(filter), (c, s) -> seen.add(c.request().model())).next(ctx, noop());
+
+        assertThat(seen).containsExactly("claude-haiku-5-5");
+        assertThat(ctx.routeRule()).isNull();
     }
 
     @Test
-    void autoIsRejectedWithMessage() {
-        assertThatThrownBy(() -> selector.select(ctx("auto").request(), null, 0))
-                .isInstanceOfSatisfying(GatewayException.class,
-                        e -> assertThat(e.code()).isEqualTo(ErrorCode.INVALID_REQUEST))
-                .hasMessage("automatic routing is not enabled");
-    }
+    void filterResolvesAutoWithTheRulesAndTheEstimate() {
+        var filter = new ModelSelectionFilter(selector, ESTIMATOR);
+        var ctx = ctx("auto");
 
-    @Test
-    void unknownModelIsRejected() {
-        assertThatThrownBy(() -> selector.select(ctx("gpt-4o").request(), null, 0))
-                .isInstanceOfSatisfying(GatewayException.class,
-                        e -> assertThat(e.code()).isEqualTo(ErrorCode.INVALID_REQUEST))
-                .hasMessageContaining("unknown model");
+        new FilterChain(List.of(filter), (c, s) -> { }).next(ctx, noop());
+
+        assertThat(ctx.request().model()).isEqualTo("claude-haiku-5-5");
+        assertThat(ctx.requestedModel()).isEqualTo("auto");
+        assertThat(ctx.routeRule()).isEqualTo("short");
     }
 
     @Test
@@ -94,8 +98,9 @@ class ModelSelectionFilterTest {
         var filter = new ModelSelectionFilter(selector, ESTIMATOR);
         List<String> seen = new ArrayList<>();
 
-        assertThatThrownBy(() -> new FilterChain(List.of(filter), (c, s) -> seen.add("terminal")).next(ctx("auto"), noop()))
-                .isInstanceOf(GatewayException.class);
+        assertThatThrownBy(() -> new FilterChain(List.of(filter), (c, s) -> seen.add("terminal")).next(ctx("gpt-4o"), noop()))
+                .isInstanceOfSatisfying(GatewayException.class,
+                        e -> assertThat(e.code()).isEqualTo(ErrorCode.INVALID_REQUEST));
         assertThat(seen).isEmpty();
     }
 

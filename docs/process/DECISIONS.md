@@ -80,6 +80,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-41 | t05 review rulings | store after `chain.next`; holder re-reads; single-flight for the first fill only; lock TTL 30 s; no cache header on early errors |
 | D-42 | Model routing rules (t06 prep) | ordered rules on size and schema, first allowed match, default, 403 when nothing allowed |
 | D-43 | Output validation details (t07 prep) | validating terminal over the router; invalid = schema, truncated or refused; one retry; structural decorator per attempt |
+| D-44 | R6 review rulings | `default`/`explicit` route labels; no tenant on routing counter; empty answers billed with reported usage; no remote schema loading; buffer bounded by `max_tokens` |
 
 ---
 
@@ -610,4 +611,27 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - Provider-native structured output as the only guard (not every provider in the chain has it, and the gateway still has to enforce the caller's schema).
   - Retrying more than once (doubles worst-case cost and latency for a model that already failed twice).
 - **Consequences:** a schema request gets no token streaming: its time to first byte is its full generation time. A provider failure in the middle of a buffered call is not retried by the router: the router counts the buffered tokens as sent, though none reached the client. Accepted for now: the client gets 502 at once. Resetting the buffer per router attempt would allow that retry later.
+
+### D-44. R6 review rulings (t06, t07)
+**t06**
+- **a. Labels:** accepted. The default route is labelled `default` in the header, the log row and the counter, so every `auto` decision names its reason. `default` and `explicit` are reserved and can't be rule names. Rule names match `[a-z][a-z0-9_]{0,39}`, so they are safe as header and label values.
+- **b. No `tenant` on `gateway.routing.decisions`:** accepted. The counter answers "which rules fire and send traffic where" (`{rule, model}`, bounded). Per-tenant model use is already in `gateway_requests_total{tenant, model}` and the log row. D-19's "counters carry tenant" applies to the request, token and cost counters, not to every counter.
+- **c.** A rule without `when` matches everything (an explicit catch-all): accepted. The counter is recorded in the selector for decisions only; requests rejected there (400/403) appear in `gateway_requests_total` with their code.
+- **d.** Dev A's edit to `api/ChatEdgeIT` (replacing the obsolete "auto → 400" test): accepted, required by the task.
+
+**t07**
+- **e. Remote schema references:** accepted after extra proof. The validator's own schema loader refuses every IRI except the draft meta-schemas bundled in the library, so a caller's schema can't make the gateway fetch anything. The review extended the test (a local HTTP server that counts hits) to nested `$ref`s, an `$id` base set deep inside `$defs` with a relative `$ref`, `$dynamicRef`, `items`, and `file:`, `jar:` and `urn:` IRIs. All are refused, with 0 fetches, on both the `checkSchema` and the `validate` paths. The meta-schema check before compiling is also accepted: it turns a schema like `{"type": 5}` into a 400 instead of two paid calls and a 502.
+- **f. Error text:** accepted. Built only from the schema side (keyword, schema path, required property names), never from the output; the whole message is capped at 300 characters.
+- **g. Empty `stop` answer billed as an estimate:** changed. `ProviderException` can now carry the usage the provider reported (`reportedUsage`). The structural check attaches it, and the router bills it through `AttemptUsage.of` (reported usage always wins over an estimate). Reason: a thinking model can spend hundreds or thousands of output tokens and still end with no text; an input-only estimate under-billed the tenant and its budget.
+- **h. Smaller choices, accepted:**
+  - The counter's `kind=schema` covers truncated and refused answers too; the log row's `error_kind` (`TRUNCATED`, `REFUSED`, `SCHEMA`) tells them apart.
+  - A client disconnect during the final burst leaves the attempt `SUCCEEDED`: the provider call completed and is billed; the request is `client_cancelled`.
+  - The schema is compiled up to 3 times per request (check, then each validation): about a millisecond each; a compiled-schema cache keyed by the schema hash is the step if t08 shows it.
+  - No zero-start for `gateway.validation.failures`: its labels (`model`, `kind`) are not a fixed set (D-38 covers fixed-label counters only).
+- **i.** Dev B's one-assertion edits to `config/CoreConfigIT` and `resilience/ResilienceConfigIT` (the injected `Terminal` is now `ValidatingTerminal`): accepted.
+
+**Checked in review**
+- **The cache cannot replay invalid output.** `ValidatingTerminal` calls `onComplete` only for a valid answer, and the cache stores only after `onComplete` with a `SUCCEEDED` serving attempt. The key contains the schema, so a stored answer is only replayed to a request with the same schema it was validated against.
+- **Buffer size.** The schema buffer, like the JSON response buffer, is bounded by `max_tokens`, which is capped at 8,192 by `RequestValidationFilter` and enforced by both providers. That is under ~100 KB of text per request. There is no separate byte cap: a provider that ignored `max_tokens` would be a provider bug. Heap use at many concurrent streams is measured in t08 (scenario 7, `-Xmx512m`).
+- **Label policy.** `MetricLabelPolicyIT` now drives an `auto` request too and asserts `gateway_routing_decisions_total{rule="short"}` and `{rule="explicit"}` next to `gateway_validation_failures_total`. Both families are inside the `gateway_*` scope of the allow-list check.
 

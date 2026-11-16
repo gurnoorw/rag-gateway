@@ -5,7 +5,7 @@ How the build is split between two developers (**Dev A**, **Dev B**) and a revie
 ## How a round works
 
 1. **Round prep (reviewer):** on `main`, commit what both developers code against: the round's migrations (DDL below) and any internal interfaces listed for the round. Developers do not edit these files; schema changes go back to the reviewer as a new migration number.
-2. **Build (developers, in parallel):** each developer creates a worktree from `main` after round prep (`git worktree add ../rg-<task>-<a|b> -b <task>/<a|b>-<slug>`), edits only the files listed as theirs, and keeps their branch green on its own (`./gradlew test`).
+2. **Build (developers, in parallel):** each developer creates a worktree from `main` after round prep (`git worktree add ../rg-tNN-a -b tNN-a`, or `-b tNN-b`), edits only the files listed as theirs, and keeps their branch green on its own (`./gradlew test`).
 3. **Merge order:** Dev A's branch merges first. Dev B then rebases onto `main` and adds the cross-cutting end-to-end test named in the task ("B's final commit"), then merges. In a two-task round, the lower task merges completely (both its commits series) before the higher one.
 4. **Integration step (reviewer):** run the proof commands, check each acceptance criterion as pass / owner-only, finalise the private task notes (not committed).
 
@@ -182,7 +182,7 @@ Merge A, then B. `./gradlew clean test`; then with compose up and the app runnin
 ### Dev A: timeouts and the Ollama adapter
 - **Owns:** `provider/StreamWatchdog.java`, `provider/ollama/OllamaProvider.java`, `provider/ollama/OllamaClientConfig.java`, edits `provider/claude/ClaudeProvider.java` (watchdog), and tests.
 - **Codes against:** `LlmProvider`, `ProviderException.Kind`, `GatewayProperties.ProviderProperties`.
-- **Must implement:** Ollama `/api/chat` with `stream: true` over JDK `HttpClient` (HTTP/1.1), model `llama3.2:1b`, `options.temperature`/`top_p`/`num_predict`/`stop` forwarded; NDJSON lines → tokens; `done_reason` → finish; `prompt_eval_count`/`eval_count` → usage; connection refused → `CONNECTION` retryable; watchdog for both adapters (`FIRST_TOKEN_TIMEOUT`, `IDLE_TIMEOUT`, retryable).
+- **Must implement:** a startup check that every model in `gateway.models` names a provider with an adapter bean (fail fast, D-30). Ollama `/api/chat` with `stream: true` over JDK `HttpClient` (HTTP/1.1), model `llama3.2:1b`, `options.temperature`/`top_p`/`num_predict`/`stop` forwarded; NDJSON lines → tokens; `done_reason` → finish; `prompt_eval_count`/`eval_count` → usage; connection refused → `CONNECTION` retryable; watchdog for both adapters (`FIRST_TOKEN_TIMEOUT`, `IDLE_TIMEOUT`, retryable).
 - **Tests:** `OllamaProviderTest` (WireMock), `StreamWatchdogTest`, `ClaudeProviderTimeoutTest` (WireMock fixed delay; headers then silence; long gap mid-stream).
 - **Acceptance criteria:**
   - AC-t03-2: primary sends no first token within the configured time → fallback answers; total time < first-token timeout × attempts + backoff cap + 1 s. *(adapter part: the timeout fires within the configured time and is retryable; end to end in B's final commit)*
@@ -190,6 +190,7 @@ Merge A, then B. `./gradlew clean test`; then with compose up and the app runnin
 ### Dev B: router, breaker, retry
 - **Owns:** `resilience/FallbackRouter.java`, `resilience/ResilienceConfig.java` (registries, `TaggedCircuitBreakerMetrics`), `resilience/FullJitterBackoff.java`, `resilience/FallbackProperties.java` (`gateway.fallback`: chain, max attempts 2, base 200 ms, cap 2 s, retry-after cap 2 s, breaker window 20, threshold 50 %, open 30 s), deletes `pipeline/DirectProviderTerminal.java`, owns `application.yml` this round, and tests.
 - **Codes against:** `Terminal`, `LlmProvider` (tests use `FakeLlmProvider`), `RequestContext.recordAttempt`, `MetricNames.PROVIDER_RETRIES/PROVIDER_FALLBACKS`.
+- **Must implement (from the t01 review):** call `ctx.startAttempt(provider, model, fallback)` before every adapter call, including retries and fallbacks, so the response headers name the provider actually streaming (D-28); an upstream 401/403 is not retried but moves to the next provider (D-30).
 - **Tests:** `FallbackRouterTest` (fakes; injectable `Clock` for the breaker), `FullJitterBackoffTest`.
 - **B's final commit (after rebasing on A):** `FallbackE2EIT` with two WireMock servers (Claude SSE, Ollama NDJSON): AC-t03-1, -2, -3, -6, -7, -8, -10 over HTTP.
 - **Acceptance criteria:**
@@ -217,7 +218,7 @@ Merge A, then B. `./gradlew clean test`; `curl -s localhost:8080/actuator/promet
 
 ### Dev A: request metrics
 - **Owns:** `metrics/RequestMetricsListener.java`, `metrics/MetricsConfig.java` (percentile histograms and SLO buckets for the three timers), and tests.
-- **Codes against:** `RequestCompletionListener`, `RequestContext`, `MetricNames`.
+- **Codes against:** `RequestCompletionListener`, `RequestContext`, `MetricNames`. Total and overhead durations end at `ctx.finishNanos()` (D-31), the same end point as the log row.
 - **Tests:** `RequestMetricsIT`, `MetricLabelPolicyIT` (scrapes `/actuator/prometheus` after mixed traffic, parses label names of `gateway_*`, `rag_*` series, asserts they are in `MetricNames.ALLOWED_LABELS` plus Prometheus `le`/`quantile`).
 - **Acceptance criteria:**
   - AC-t04-1: after 5 requests for tenant A, the request counter for A on `/actuator/prometheus` is 5.

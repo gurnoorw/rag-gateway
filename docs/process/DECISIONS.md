@@ -62,6 +62,13 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-23 | Key lookup cache | Caffeine, 30 s |
 | D-24 | Eval harness and judge | separate source set; judge through its own SDK client |
 | D-25 | Delivery process | two-developer rounds, worktrees, strict merge order |
+| D-26 | Request mapping beyond D-16 | sampling ranges, ≥1 conversational message, `max_completion_tokens` wins, system messages joined first |
+| D-27 | Spring MVC errors and unknown paths | keep MVC status with the OpenAI body; `/v1/**` authenticates before routing |
+| D-28 | Which provider the headers name | terminal announces each attempt on the context before streaming |
+| D-29 | Claude key header | explicit `X-Api-Key`; SDK `apiKey` still set |
+| D-30 | Edge statuses | 499 on early cancel; upstream 401/403 → 502; model without adapter → 400 in t01 only; blank key starts with a warning |
+| D-31 | Request latency end point | frozen at `RequestContext.finish`, not at log time |
+| D-32 | Environment variable names | `GATEWAY_CLAUDE_*`, `GATEWAY_OLLAMA_BASE_URL`, not the `ANTHROPIC_*` names |
 
 ---
 
@@ -253,7 +260,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 - **Decision:** Spring MVC (Tomcat) with `spring.threads.virtual.enabled=true`, so each request already runs on its own virtual thread. The chat controller takes the `HttpServletResponse` and runs the pipeline on that thread. The client sink commits status and headers lazily at the first byte (C15). Tomcat `max-connections` is raised to 10,000.
 - **Reason:** no executor hand-off, no async servlet timeouts, errors before the first token can still choose their status, and disconnects surface as a failed write on the same thread that owns the upstream call.
 - **Rejected:** `SseEmitter` + executor (LLD; commits a 200 early); WebFlux (harder to write and reason about; same scaling for I/O-bound work).
-- **Consequences:** blocking inside `synchronized` pins a carrier thread on Java 21; code under our control holds no lock across I/O (`ReentrantLock` where needed). Third-party pinning is watched in the t08 open-streams scenario.
+- **Consequences:** blocking inside `synchronized` pins a carrier thread on Java 21; code under our control holds no lock across I/O (`ReentrantLock` where needed). This includes `ConcurrentHashMap.compute` and anything built on it, such as Caffeine's `get(key, loader)`: loaders that do I/O run outside the cache (`getIfPresent`, load, `put`), as in the key store (amended in the t01 review). Third-party pinning (e.g. OkHttp inside the Claude SDK) is watched in the t08 open-streams scenario.
 
 ### D-04. HTTP clients for providers
 - **Decision:** Claude through the **official Anthropic Java SDK** (`com.anthropic:anthropic-java` 3.3.0, `AnthropicOkHttpClient`) configured with `baseUrl` (WireMock in tests), `apiKey`, `timeout(Timeout.builder().connect(..).read(..))` and `maxRetries(0)`; streaming via `client.messages().createStreaming(params)` returning a closeable `StreamResponse<RawMessageStreamEvent>`. Ollama (no official Java SDK) through the **JDK `HttpClient`** forced to HTTP/1.1, native `/api/chat` with NDJSON streaming and `/api/embed` for embeddings.
@@ -399,4 +406,51 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
 - **Reason:** eval code must not ship in the app; judge calls must not pollute gateway metrics or cache.
 
 ### D-25. Delivery process
-- **Decision:** each round, two developers work in separate git worktrees on disjoint files against the committed contracts; the reviewer merges task branches to `main` strictly in task order, runs the integration step and the proof commands in WORK_PLAN.md. Rules for developers are in TEAM_RULES.md.
+- **Decision:** each round, two developers work in separate git worktrees on disjoint files against the committed contracts; the reviewer merges task branches to `main` strictly in task order, runs the integration step and the proof commands in WORK_PLAN.md. Rules for developers are in TEAM_RULES.md. Branches are named `tNN-a` and `tNN-b` and merged with `--no-ff` (amended in the t01 review to match the convention in use).
+
+---
+
+## Part 3: rulings from the t01 review (2026-11-16)
+
+### D-26. Request mapping rules beyond D-16
+- **Context:** the t01 mapper added rules D-16 did not state.
+- **Decision:** accepted as the documented surface: `temperature` in [0, 2] and `top_p` in [0, 1] (OpenAI's ranges); at least one `user` or `assistant` message; `max_completion_tokens` wins over `max_tokens`; all `system` messages are joined with a blank line into one system message placed first.
+- **Reason:** out-of-range sampling values would otherwise be cached or forwarded to Ollama unchecked; a system-only request is rejected by both providers anyway, so it fails early with a clear 400; `max_completion_tokens` is OpenAI's current name and `max_tokens` its deprecated alias; both providers take a single system prompt.
+- **Rejected:** passing several system messages through (Claude has one `system` field); silently dropping out-of-range values.
+- **Consequences:** a system message in the middle of a conversation loses its position; stated in the README limitations.
+
+### D-27. Spring MVC's own errors and unknown paths
+- **Decision:** errors raised by Spring MVC itself (405, 406, 415, unreadable body) keep their HTTP status and use the OpenAI error body (`invalid_request_error` type for 4xx). The auth interceptor covers `/v1/**`, so an unknown path under `/v1/` without a valid key is 401, and with a valid key 404.
+- **Reason:** one error shape for every client-visible failure; the correct status is more useful than forcing 400; unauthenticated callers learn nothing about which routes exist.
+- **Rejected:** mapping every MVC error to 400; authenticating only known routes.
+
+### D-28. Which provider and model the response headers name
+- **Context:** the client sink commits `X-Gateway-Provider`, `X-Gateway-Model` and the body `model` at the first byte, but the attempt was only recorded when it ended, so the sink fell back to the catalog entry for the requested model. With fallback (t03) that would name the primary while the fallback streams.
+- **Decision:** contract change made in t01: `RequestContext.startAttempt(provider, model, fallback)` is called by every terminal immediately before each adapter call; the client sinks read `currentProvider()/currentModel()` when they commit. Retry and fallback happen only before the first byte, so the attempt announced at the first byte is always the one serving the response.
+- **Rejected:** deferring headers to the end (impossible for a stream); HTTP trailers (clients ignore them).
+- **Consequences:** the t03 router must call `startAttempt` before every attempt, including retries and fallbacks (added to the t03 plan).
+
+### D-29. Claude API key header
+- **Context:** SDK 3.3.0 sends a static credential given to `apiKey(..)` as `Authorization: Bearer` unless the request already carries `X-Api-Key` or `Authorization`.
+- **Decision:** keep both: `apiKey(key)` (so the SDK never falls back to environment or profile credentials) and an explicit `X-Api-Key` default header (so the SDK skips Bearer). Exactly one credential header is sent.
+- **Reason:** `X-Api-Key` is the Messages API's documented API-key header on every API version, works through proxies that only read it, and makes the WireMock assertion exact.
+- **Rejected:** relying on the SDK default (works against the API today, but depends on SDK-internal header logic and on proxies forwarding Bearer).
+- **Consequences:** re-check the header on every SDK upgrade (`claudeReceivesTheApiKeyHeaderAndNoSamplingParameters` covers it).
+
+### D-30. Edge statuses
+- **499 when the client cancels before the first byte:** accepted. Nothing was sent; 499 ("client closed request") keeps these rows apart from real 4xx in the log. After the first byte the row records 200.
+- **Upstream 401/403:** changed in the review from 400 `upstream_rejected` to 502 `provider_error`: it means the gateway's own credential is missing or lacks access, which the caller cannot fix. In t03 such an error is not retried but does move to the next provider in the chain (the primary is unusable, not the request).
+- **Catalog model whose provider has no adapter:** 400 in t01 only (Ollama has no adapter until t03). From t03 the application fails at startup if any catalog model names a provider without an adapter, so a running gateway cannot reach this case.
+- **Blank Claude API key:** the app starts with a placeholder (needed for WireMock and local runs without a key) and logs a WARN at startup; Claude calls then fail with 502 `provider_error`.
+
+### D-31. Request latency end point
+- **Context:** `latency_ms` was measured when the log writer ran, so it would grow with every listener that runs before it.
+- **Decision:** `RequestContext.finish(...)` freezes `finishNanos` after the response is written and closed; the log writer and the t04 metrics listener both use it.
+- **Consequences:** latency excludes the log insert and listener time, as C7 intends.
+
+### D-32. Environment variable names
+- **Context:** `application.yml` read `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`. Other tools read the same names, and `ANTHROPIC_BASE_URL` was found set in this build environment by such a tool, so `bootRun` would have sent gateway traffic to that host silently.
+- **Decision:** the gateway reads `GATEWAY_CLAUDE_BASE_URL`, `GATEWAY_CLAUDE_API_KEY` and `GATEWAY_OLLAMA_BASE_URL` (defaults: the public Anthropic API, empty key, `http://localhost:11434`). `.env.example` and `scripts/check_setup.sh` use the new names.
+- **Rejected:** keeping the shared names (silent misrouting; a key meant for another tool used by the gateway).
+- **Consequences:** the t14 secrets scan also looks for `GATEWAY_CLAUDE_API_KEY` followed by a key-like value.
+

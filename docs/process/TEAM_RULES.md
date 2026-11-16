@@ -3,7 +3,7 @@
 For the two developers and the reviewer. The plan is `WORK_PLAN.md`; the reasons are `DECISIONS.md`; the contracts are the javadoc in `src/main/java/dev/raggateway`.
 
 ## Branches, worktrees, commits
-- One worktree per developer per task, created from `main` after the round-prep commit: `git worktree add ../rg-t05-a -b t05/a-redis-cache`. Branch names: `tNN/a-<slug>` or `tNN/b-<slug>`.
+- One worktree per developer per task, created from `main` after the round-prep commit: `git worktree add ../rg-t05-a -b t05-a`. Branch names: `tNN-a` (Dev A) and `tNN-b` (Dev B); in a two-task round each developer uses the branch of their own task (e.g. `t06-a`, `t07-b`). The reviewer merges each with `--no-ff`.
 - Small commits, one concern each. Message: `tNN: <imperative summary>` (scaffold and process commits use a type prefix such as `docs(process):`). Body explains why when it is not obvious.
 - Every commit message ends with exactly these two lines:
   ```

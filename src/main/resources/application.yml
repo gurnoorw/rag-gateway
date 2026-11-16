@@ -89,6 +89,14 @@ gateway:
       window: 20                 # count-based; also the minimum number of calls before it can open
       failure-rate-threshold: 50 # percent
       open-duration: 30s         # then one trial call (half-open)
+  # Exact-match response cache (t05, C21, D-40): only temperature 0 without X-Gateway-Cache-Bypass is eligible;
+  # entries are per tenant. A cold key is filled by one request holding a lock; the others poll every
+  # poll-interval and call the provider themselves after lock-ttl. Redis errors read as a miss (fail open).
+  cache:
+    enabled: true
+    ttl: 6h
+    lock-ttl: 10s
+    poll-interval: 50ms
   # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
   # tools on the same machine, which could silently point the gateway at another host or account.
   providers:

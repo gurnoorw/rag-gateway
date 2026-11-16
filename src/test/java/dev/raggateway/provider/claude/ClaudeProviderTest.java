@@ -182,8 +182,9 @@ class ClaudeProviderTest {
         provider.stream(request, new RecordingSink());
 
         var sent = wireMock.getAllServeEvents().get(0).getRequest();
-        // SDK 3.3.0 presents a static API key as "Authorization: Bearer" (StaticAuthHeaders, checked with javap)
-        assertThat(sent.getHeader("Authorization")).isEqualTo("Bearer " + FAKE_KEY);
+        // API keys go in x-api-key; without the explicit header SDK 3.3.0 would send "Authorization: Bearer"
+        assertThat(sent.getHeader("x-api-key")).isEqualTo(FAKE_KEY);
+        assertThat(sent.containsHeader("Authorization")).isFalse();
         assertThat(sent.getHeader("anthropic-version")).isEqualTo("2026-10-21");
         assertThat(sent.getBodyAsString()).doesNotContain("temperature", "top_p", "top_k", "thinking",
                 "fallbacks", "effort");

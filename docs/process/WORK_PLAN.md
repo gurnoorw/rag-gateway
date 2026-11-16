@@ -384,37 +384,118 @@ Merge t06, then t07 (B rebases on `main` with t06). `./gradlew clean test`; curl
 
 ## t08: README, architecture diagram, load-test numbers, Gate 1 (Round R7)
 
-**Design.** A reproducible benchmark: two WireMock containers as the mock Claude and mock Ollama (fixed latency, streaming bodies), the app run with `-Xmx512m` and virtual threads, k6 via the `grafana/k6` image, one command that runs every scenario and writes a committed summary file that the README numbers are checked against. Numbers from this environment are labelled per C14. Decisions: C2, C7, C14, C27, D-20, D-21.
+**Design.** A reproducible benchmark and a README whose every number comes from a run. Pieces:
+- **Mock providers:** two WireMock containers act as Claude and Ollama, with fixed latency and streaming bodies.
+- **The app:** the jar with `-Xmx512m` and virtual threads, as on the laptop.
+- **Load:** k6 from the pinned `grafana/k6:2.3.0` image, run with `--network host`. A k6 binary can't be installed here, so the image is used everywhere.
+- **One command:** runs every scenario and writes one committed summary file per run, `bench/summary/<run_id>.json`, in the shape of `bench/summary.schema.json`.
+- **README check:** the measured table cites a run id and a key into that file for every number. A script fails the build step if a number has no matching value.
+- **Labelling:** numbers measured here say "cloud container, 4 vCPU / 15 GB". The owner's laptop run adds rows labelled "8 GB MacBook Air". Nothing else is ever written as a measurement.
 
-**Round prep:** none. Dev A owns `docker-compose.yml` this round (adds the `mock` profile).
+Decisions: C2, C7, C14, C27, D-20, D-21, D-39, D-45.
 
-### Dev A: benchmark harness
-- **Owns:** `docker-compose.yml` (adds `mock-claude`, `mock-ollama` services, `wiremock/wiremock:3.13.2`, profile `mock`), `bench/wiremock/**`, `bench/k6/*.js`, `bench/run-all.sh`, `bench/seed-bench.sql`, `bench/summary/` (committed summary files; raw k6 output goes to the gitignored `bench/results/`), `src/main/resources/application-bench.yml`.
-- **Scenarios:** (1) overhead, direct to mock vs through gateway, ≥ 10,000 requests: report "added latency seen by the client" (p50/p95/p99 of the TTFT and total-time difference, from k6) and, separately, "gateway processing overhead" (p50/p95/p99 of `gateway_overhead_seconds`, which excludes provider time and retry/cache waits, D-39); never one number for both; (2) cache-hit latency p50/p99; (3) cache hit rate with a stated repeat share; (4) cost per 1,000 requests ×4 (baseline, cache, routing, both) from `request_log`, labelled "modelled from list prices on a synthetic workload" with the price date; (5) fallback: stop `mock-claude` mid-run, record the time and the success rate after it, added latency; (6) rate limit: one tenant above its TPM, share of over-limit calls with 429 + `Retry-After`, admitted tokens/min vs limit; (6b) Redis unavailable from app start, once refused (container stopped) and once black-holed (e.g. a non-routable host): added latency per request vs Redis up, to decide on the D-17 skip window; (7) open streams: N concurrent 5 s streams at `-Xmx512m`, largest N with 0 errors, with heap setting; plus one run where the mock holds the response headers past the first-token timeout (abandoned Claude calls, D-37 c): report parked virtual threads, heap and fallback success at that N; (8) request-log insert time from `gateway_requestlog_write_seconds`.
+**Round prep (reviewer, done):**
+- **Result-file contract:** `bench/summary.schema.json`, checked by `BenchSummarySchemaTest`. It has no numbers. Every required field is listed there; a scenario that was not run is absent, never zero.
+- **Pinned images, already pulled here:** `grafana/k6:2.3.0` and `wiremock/wiremock:3.13.2`.
+- No migration.
+
+**File split:**
+- **Dev A:** `bench/**` except `summary.schema.json`; `docker-compose.yml` (adds the `mock` profile); `src/main/resources/application-bench.yml`; one bucket entry in `metrics/MetricsConfig.java` (below).
+- **Dev B:** `README.md`, `scripts/check_readme_numbers.py`, `scripts/check_mermaid.sh`, `scripts/demo.sh`, `scripts/quickstart_check.sh`, and their tests under `scripts/tests/`.
+
+### Scenarios (all in one run; each writes its block of the summary)
+| # | Scenario | Load model | What is reported (summary key) |
+|---|---|---|---|
+| 1 | **Overhead**: the same load straight to the mock and through the gateway; ≥ 10,000 requests through the gateway | open: `constant-arrival-rate` | `overhead`: "added latency seen by the client" = gateway − direct for TTFB (k6 `http_req_waiting`, which is time to first token here: the gateway commits headers with the first token, and the mock sends nothing before its first chunk) and for total time, p50/p95/p99; and, separately, "gateway processing overhead" = `gateway_overhead_seconds` p50/p95/p99 from the scrape (excludes provider time and waits, D-39). Never one number for both. |
+| 2 | **Cache-hit latency**: a warmed set of repeated `temperature: 0` prompts | open | `cache_hit_latency` p50/p95/p99, requests. Target from the brief: p99 < 200 ms (reported, not asserted) |
+| 3 | **Cache hit rate**: a pool of prompts with a stated repeat share (e.g. 50 %) | open | `cache_hit_rate`: configured share, measured rate, requests, workload text |
+| 4 | **Cost per 1,000 requests**: one workload, four runs: baseline (temperature > 0, explicit strong model), cache only, routing only (`auto`), both | open | `cost_per_1k` from `SUM(cost_usd)` in `request_log` per run, labelled "modelled from list prices on a synthetic workload", with the price date |
+| 5 | **Fallback**: stop the `mock-claude` container mid-run | open | `fallback`: kill time, success rate after it, added latency (after − before) p50/p95/p99 |
+| 6 | **Rate limit**: one tenant driven above its TPM | open | `rate_limit` from `request_log` rows of that tenant: over-limit requests, those with 429 + `Retry-After` (k6 checks the header), share, admitted tokens/min vs limit |
+| 6b | **Redis unavailable from start**: app started with Redis stopped (connection refused) and once with `REDIS_HOST` = a non-routable address (black-holed) | open | `redis_down_from_start`: added latency vs scenario 1 p50/p95/p99, errors. Decides the D-17 skip window |
+| 7 | **Open streams**: N concurrent 5 s streams (N stepped, e.g. 500, 1,000, 2,000, 4,000) at `-Xmx512m`, app run with `-Djdk.tracePinnedThreads=short` | closed: `constant-vus` holding N | `open_streams`: largest N with 0 errors; per run errors, peak heap used, peak virtual threads (`jvm_threads_live`), pinned-thread reports and their top frames (answers the D-03 question on OkHttp/SDK pinning) |
+| 7b | **Headers delayed**: the Claude mock holds its response headers past the 5 s first-token timeout, at one N from 7 | closed | `open_streams.headers_delayed`: errors, fallback success rate, peak heap, peak virtual threads (abandoned calls, D-37 c) |
+| 8 | **Log-insert cost** | from scenario 1 | `log_insert` p50/p99 from `gateway_requestlog_write_seconds` (Dev A adds 0.5, 1, 2, 5, 10, 25, 50, 100 ms buckets for this timer in `MetricsConfig`) |
+
+### Dev A: harness, mocks, k6, result capture
+- **Owns:** see the file split.
+  - `bench/run-all.sh`.
+  - `bench/k6/*.js`, one per scenario.
+  - `bench/wiremock/{claude,ollama}/mappings/**`: Claude SSE in the Messages format (use the shapes of `ClaudeSse`); Ollama NDJSON (shapes of `OllamaNdjson`); fixed latency: first chunk after 300 ms, the rest over 1 s; scenario 7b's header-delay mapping.
+  - `bench/seed-bench.sql`: bench tenants with large TPM and budget, one small-TPM tenant for scenario 6.
+  - `bench/lib/*.py`: summary builder, scrape and SQL readers, schema check.
+  - `docker-compose.yml`: profile `mock` with `mock-claude` and `mock-ollama` on fixed ports.
+  - `application-bench.yml`: provider base URLs → the mocks; Redis and Postgres from compose.
+  - The `MetricsConfig` bucket entry for `gateway.requestlog.write`.
+  - The committed container run `bench/summary/<run_id>.json`.
+- **`bench/run-all.sh --measured-on "<label>" [--only <scenario,...>]`:**
+  - `--measured-on` is required; there is no default, so no run can be mislabelled.
+  - Builds the jar, starts `docker compose --profile mock up -d`, starts the app with `-Xmx512m -Dspring.profiles.active=bench` (plus `-Djdk.tracePinnedThreads=short` for 7), and seeds.
+  - Runs each scenario with `docker run --rm --network host -v "$PWD/bench:/bench" grafana/k6:2.3.0 run --summary-export /bench/results/<run_id>-<n>.json /bench/k6/<n>.js`. Raw output stays in the gitignored `bench/results/`.
+  - Reads `/actuator/prometheus` and `request_log`, writes `bench/summary/<run_id>.json`, validates it against the schema, exits non-zero on any error, and stops what it started.
+- **Rules:**
+  - k6 thresholds may fail a run only on errors, not on latency: a slow number is still a number to report.
+  - The overhead scenario's direct and gateway runs use the same arrival rate and mock.
+  - Scenario 4 resets `request_log` between its four runs, or filters by run tag via a tenant per run. Prefer a tenant per run; no deletes.
+  - Record the git commit and the `setup` block exactly as the schema asks, including `load_generator_shares_host: true` here.
 - **Acceptance criteria:**
   - AC-t08-1: one documented command runs all scenarios from a clean checkout and exits 0.
   - AC-t08-5: the overhead scenario reports p50, p95, p99 and the request count, and the request count is ≥ 10,000.
   - AC-t08-6: the fallback scenario's summary shows the time the primary was killed and the success rate after it.
   - AC-t08-7: cost rows are labelled "modelled from list prices on a synthetic workload", with the price date.
   - AC-t08-10: the open-streams scenario reports N, heap setting and error count.
+- **Private task notes:** Dev B drafts (below).
 
-### Dev B: README, checks, demo
-- **Owns:** `README.md`, `scripts/check_readme_numbers.py`, `scripts/check_mermaid.sh`, `scripts/demo.sh` (Gate 1 sequence: a 429 with `Retry-After`, a cache hit with the hit header, a fallback with the primary stopped, a schema-validated JSON response, the usage endpoint), `scripts/quickstart_check.sh`.
-- **README sections:** what it is; quickstart (≤ 4 commands); architecture diagram (Mermaid); request path; "designed for" table (C2, C27); "measured" table with "Measured on" and run date; trade-offs table; limitations (incl. D-05, D-08, D-17 consequences); how to reproduce.
-- **B's final commit (after rebasing on A):** fill the measured table from `bench/summary/*`, run the checks.
+### Dev B: README, diagram, checks, Gate 1 demo
+- **Owns:** see the file split. Codes against `bench/summary.schema.json` only (no dependency on Dev A's code). Tests for the scripts use fixture summaries under `scripts/tests/fixtures/` marked as test data (`measured_on: "test data, not a measurement"`).
+- **README sections:**
+  - What it is.
+  - Quickstart in ≤ 4 commands.
+  - Architecture (Mermaid `flowchart`: client → edge → filters → validating terminal → router → Claude/Ollama; Redis, Postgres, Prometheus).
+  - Request path.
+  - "Designed for": C2 and C27, assumptions, never measured.
+  - "Measured", with columns Metric | Value | Unit | Measured on | Run | Source key.
+  - Trade-offs.
+  - Limitations: D-05 temperature, D-08 one price tier, D-17 fail-open, D-36 zero budget, D-38 bucket edges, D-43 buffered schema calls.
+  - How to reproduce.
+  - Every percentile row states the bucket edges or "k6 client-side".
+- **`scripts/check_readme_numbers.py`:**
+  - Every Value cell of the measured table must equal the summary value at Source key in `bench/summary/<Run>.json`. Rounding: latency to 1 decimal ms, rates to 1 decimal %, USD to 4 decimals.
+  - Its Measured on must equal that file's `measured_on`.
+  - "MacBook" may appear only in rows whose file says so.
+  - A cell may read "pending laptop run" with an empty Run.
+  - It also lists every other number in the README outside the designed-for table, for the reviewer's AC-t08-4 check.
+  - Exit non-zero on any mismatch. B's final commit runs it on the committed container run.
+- **`scripts/demo.sh` (Gate 1),** against the `mock` profile, in order:
+  1. a 429 with `Retry-After`;
+  2. a cache hit with `X-Gateway-Cache: HIT`;
+  3. a fallback with `mock-claude` stopped (`X-Gateway-Provider: ollama`);
+  4. a schema-validated JSON response;
+  5. `GET /v1/usage`.
+  - Each step prints what it expects and what it got, and fails if they differ.
+- **`scripts/check_mermaid.sh`:** renders the README's Mermaid block with `minlag/mermaid-cli` (pin a tag at least two weeks old), or documents a rendered-once check if the image can't be pulled.
+- **B's final commit (after rebasing on A):** fill the measured table from the committed container run and run the checks.
 - **Acceptance criteria:**
   - AC-t08-2: every figure in the README benchmark table appears in a committed summary file produced by that command (a script compares them).
   - AC-t08-3: every table row has a non-empty "Measured on" value, and the string "MacBook" appears only in rows the owner added.
   - AC-t08-4: the README contains no latency, throughput or percentage figure outside the "designed for" table that is missing from the summary file (review check by the reviewer, listed in the review notes).
   - AC-t08-8: the Mermaid diagram block parses (scripted check or rendered once and noted).
   - AC-t08-9: following the quickstart on a clean checkout gives a 200 from a sample `curl` (run in the container against WireMock mode).
+- **Private task notes:** Dev B drafts `t08`.
 
 ### Integration step
-Merge A, then B. `bash bench/run-all.sh` (exit 0); `python3 scripts/check_readme_numbers.py`; `bash scripts/quickstart_check.sh`; `bash scripts/demo.sh`. Gate 1 check per the round notes.
-- **Runs here:** every scenario, labelled "cloud container, 4 vCPU / 15 GB, gateway + WireMock + k6 on one host, run <date>"; the README states that the load generator shares the CPUs.
-- **Owner only:** run the same command on the laptop and add rows labelled "8 GB MacBook Air"; take the Grafana screenshot.
-
----
+Merge A, then B. Proof:
+```bash
+./gradlew clean build
+bash bench/run-all.sh --measured-on "cloud container, 4 vCPU / 15 GB"     # AC-t08-1; commit the new summary
+python3 scripts/check_readme_numbers.py                                     # AC-t08-2, -3 (+ list for -4)
+bash scripts/quickstart_check.sh && bash scripts/demo.sh && bash scripts/check_mermaid.sh
+```
+- **Runs here:** every scenario. Label "cloud container, 4 vCPU / 15 GB"; the README states that gateway, mocks and k6 share the host's CPUs.
+- **Owner only:**
+  - On the laptop, `bash bench/run-all.sh --measured-on "8 GB MacBook Air"`, commit the summary, and add the rows or column (the check accepts them).
+  - The Grafana screenshot.
+  - Laptop numbers decide the resume figures.
 
 ## t09: Document ingestion, chunking, embeddings into pgvector (Round R8)
 

@@ -81,6 +81,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-42 | Model routing rules (t06 prep) | ordered rules on size and schema, first allowed match, default, 403 when nothing allowed |
 | D-43 | Output validation details (t07 prep) | validating terminal over the router; invalid = schema, truncated or refused; one retry; structural decorator per attempt |
 | D-44 | R6 review rulings | `default`/`explicit` route labels; no tenant on routing counter; empty answers billed with reported usage; no remote schema loading; buffer bounded by `max_tokens` |
+| D-45 | Benchmark method (t08 prep) | k6 image, open vs closed load per scenario, TTFB as time to first token, summary file contract, mandatory hardware label, README numbers checked against files |
 
 ---
 
@@ -634,4 +635,20 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
 - **The cache cannot replay invalid output.** `ValidatingTerminal` calls `onComplete` only for a valid answer, and the cache stores only after `onComplete` with a `SUCCEEDED` serving attempt. The key contains the schema, so a stored answer is only replayed to a request with the same schema it was validated against.
 - **Buffer size.** The schema buffer, like the JSON response buffer, is bounded by `max_tokens`, which is capped at 8,192 by `RequestValidationFilter` and enforced by both providers. That is under ~100 KB of text per request. There is no separate byte cap: a provider that ignored `max_tokens` would be a provider bug. Heap use at many concurrent streams is measured in t08 (scenario 7, `-Xmx512m`).
 - **Label policy.** `MetricLabelPolicyIT` now drives an `auto` request too and asserts `gateway_routing_decisions_total{rule="short"}` and `{rule="explicit"}` next to `gateway_validation_failures_total`. Both families are inside the `gateway_*` scope of the allow-list check.
+
+### D-45. Benchmark method (t08 prep)
+- **Context:** C14, D-21 and D-39 set the rules (measured, labelled, two overhead numbers). The method still needed fixing before anyone writes a script: load model, what k6 metric stands for "time to first token", where results live, how the README is held to them.
+- **Decision:**
+  - k6 from the pinned `grafana/k6:2.3.0` image with `--network host`, here and on the laptop, so both runs use the same tool.
+  - Latency scenarios use an **open** load model (`constant-arrival-rate`): requests arrive on schedule whether or not earlier ones finished, so a slow gateway can't slow the load down and hide its own tail (coordinated omission). The open-streams scenario uses a **closed** model (N virtual users each holding a stream), because its question is "how many concurrent streams", not "what rate".
+  - Time to first token from the client side is k6's `http_req_waiting`: time to the first response byte. The gateway commits its headers with the first token (C15), and the mock sends nothing before its first chunk, so for both targets that is the first token.
+  - Results: one summary file per run in `bench/summary/`, shaped by `bench/summary.schema.json` and committed. Raw k6 output stays in the gitignored `bench/results/`.
+  - `--measured-on` is required by the run command. The README's measured table names the run and the key for every value, and `scripts/check_readme_numbers.py` fails on any mismatch.
+  - The app runs with `-Xmx512m` and virtual threads in every scenario. The open-streams runs add `-Djdk.tracePinnedThreads=short` to count carrier pinning (D-03, D-37).
+- **Reason:** a closed model (fixed VUs looping) under-reports tail latency: when the system slows, it sends less. A file per run plus a check makes "every number is measured" mechanical rather than a promise.
+- **Rejected:** Gatling (C10); k6 thresholds that fail a run on latency (a slow result is still a result to publish); summaries written by hand; one combined "overhead" figure (D-39).
+- **Consequences:**
+  - In this environment k6, the mocks and the gateway share 4 vCPUs. That inflates latency and caps throughput; the README says so next to the label.
+  - Results answer "what does the gateway add on this machine", not "how does it behave against real providers" (the mock has fixed latency and never rate-limits).
+  - The laptop run adds its own rows and replaces nothing.
 

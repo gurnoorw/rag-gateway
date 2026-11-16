@@ -122,10 +122,18 @@ PY
   fi
 }
 
-count_requests() { # count_requests <mock url> <marker>: requests the mock received containing the marker
-  curl -fsS -X POST "$1/__admin/requests/count" -H 'Content-Type: application/json' \
-    -d "{\"method\":\"POST\",\"bodyPatterns\":[{\"contains\":\"$2\"}]}" 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])' 2>/dev/null
+provider_attempts() { # provider_attempts <response headers file>: attempts in the request's log row
+  # The bench mocks run with --no-request-journal, so provider calls are counted from the gateway's own
+  # request_log row (by X-Request-Id), written just after the response closes: poll briefly.
+  local id v _
+  id=$(header "$1" X-Request-Id)
+  echo "$id" | grep -Eq '^[0-9a-f-]{36}$' || { echo "no request id"; return; }
+  for _ in $(seq 1 10); do
+    v=$($PSQL -tA -c "SELECT attempts FROM request_log WHERE request_id = '$id'" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$v" ] && { echo "$v"; return; }
+    sleep 0.5
+  done
+  echo "no log row"
 }
 
 cleanup() {
@@ -220,7 +228,8 @@ check "second: status"                 "200"                 "$(cat "$work/c2.co
 check "second: X-Gateway-Cache"        "HIT"                 "$(header "$work/c2.h" X-Gateway-Cache)"
 check "second: same answer"            "$(json "$work/c1.b" "d['choices'][0]['message']['content']")" \
                                        "$(json "$work/c2.b" "d['choices'][0]['message']['content']")"
-check "mock-claude calls for the key"  "1"                   "$(count_requests "$CLAUDE_URL" "rgw-demo-cache $NONCE")"
+check "first: provider attempts"       "1"                   "$(provider_attempts "$work/c1.h")"
+check "second: provider attempts"      "0"                   "$(provider_attempts "$work/c2.h")"
 
 # ------------------------------------------------------------------ 3. fallback
 step "3. fallback: mock-claude stopped"
@@ -247,7 +256,7 @@ step "4b. output validation: an answer that does not match the schema"
 chat s2 "$KEY" "$(body "rgw-demo-schema-bad $NONCE: capital of France as JSON" claude-haiku-5-5 0.7 "$SCHEMA_FORMAT")"
 check "status"                         "502"                 "$(cat "$work/s2.code")"
 check "error code"                     "invalid_model_output" "$(json "$work/s2.b" "d['error']['code']")"
-check "provider calls (one retry)"     "2"                   "$(count_requests "$CLAUDE_URL" "rgw-demo-schema-bad $NONCE")"
+check "provider attempts (one retry)"  "2"                   "$(provider_attempts "$work/s2.h")"
 
 # ------------------------------------------------------------------ 5. usage
 step "5. GET /v1/usage for $TENANT"

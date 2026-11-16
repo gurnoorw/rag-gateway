@@ -77,6 +77,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-38 | Request metrics details | bounded label values; explicit histogram buckets; per-attempt tokens; zero series at startup; no duplicates of earlier metrics |
 | D-39 | t04 review rulings | overhead excludes provider time and deliberate waits; small test pools; first-increment rate gap documented; `$__rate_interval` |
 | D-40 | Cache details (t05 prep) | key after selection, `cache:v1:` prefix; store rules; single-flight with re-lock; fail open = go ahead; per-tenant entries |
+| D-41 | t05 review rulings | store after `chain.next`; holder re-reads; single-flight for the first fill only; lock TTL 30 s; no cache header on early errors |
 
 ---
 
@@ -539,7 +540,7 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - The key (`CacheKeyStrategy`) is computed after model selection. It holds tenant, resolved model, messages, temperature, top_p, max tokens, stop and the canonicalised schema; it leaves out `stream`, `include_usage`, the key id and the request id. It is `cache:v1:` + SHA-256 of canonical JSON.
   - Entries are per tenant: two keys of one tenant share entries, tenants never do.
   - Only `temperature == 0` without the bypass header is eligible. Only a complete, non-fallback answer with finish reason `stop` or `length` from the selected model is stored, after the client's stream is closed.
-  - A miss takes a lock `SET lock:<key> <owner> NX PX 10s`. Waiters poll the cache and retry the lock every 50 ms, so a holder that failed hands over at once, and call through after the lock TTL. Their wait is recorded as a deliberate wait. Unlock deletes only the caller's own lock.
+  - A miss takes a lock `SET lock:<key> <owner> NX PX 30s` (lock TTL raised from 10 s in the t05 review, D-41). Waiters poll the cache and retry the lock every 50 ms, so a holder that failed hands over at once, and call through after the lock TTL. Their wait is recorded as a deliberate wait. Unlock deletes only the caller's own lock.
   - `tryLock` returns a random token; `unlock(key, token)` deletes the lock only while it still holds that token.
   - On any Redis error the cache is a miss, a put is dropped, and `tryLock` returns `FAILED_OPEN` ("go ahead").
 - **Reason:**
@@ -554,4 +555,26 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - Request coalescing in process memory (works only within one instance; Redis serves all instances).
   - Caching refusals (`content_filter`): a refusal may depend on policy that changes.
 - **Consequences:** a stream longer than the lock TTL lets waiters call through, so very slow cold keys can still produce more than one provider call (bounded by the number of waiters). The cache key changes when the catalog maps a public name to a new upstream id only if the public name changes; an alias change needs a version bump of the prefix or a TTL wait (t05 notes, question 4).
+
+### D-41. t05 review rulings
+- **a. Store after `chain.next` returns, not in `onComplete`:** correct. The router records the serving attempt (and its `fallback` flag) only after the adapter returns, so inside `onComplete` the context still shows the previous attempt. The client's stream is closed before the store: the recording wrapper forwards `onComplete` first, and the client sink writes `[DONE]` and closes the output stream there. The holder stores before it unlocks, so a waiter that sees the lock free also sees the answer. Rejected: recording the serving attempt before `onComplete` in the router. It would split the attempt bookkeeping across two places for one consumer, and the usage of a stream that fails in its last write would then need correcting.
+- **b. The holder reads the cache once more after taking the lock:** accepted. One extra GET (~0.2 ms) per cold miss, against a second provider call when a previous holder stored and unlocked between this request's read and its lock.
+- **c. Eligibility order:** accepted. Disabled or `temperature` ≠ 0 is `NOT_ELIGIBLE` even with the bypass header; `BYPASS` only reports a request that would otherwise have used the cache, so the header and the metric say something true.
+- **d. A waiter that gave up after the lock TTL still stores a qualifying answer:** accepted. It is a valid primary answer for the same key; the last put wins with an equal value.
+- **e. Outage behaviour and the lock TTL:** changed.
+  - *Single-flight covers the first fill only.* When a waiter finds the lock free and still no answer, the fill failed or was not cacheable (typically a fallback answer during an outage, never stored, C21). It now reads once more, releases the lock at once and calls the provider without holding it. Before, the waiters took the lock one after another, so N identical requests during an outage were served serially (N × fallback latency).
+  - *Lock TTL 10 s → 30 s.* A full answer typically streams for 5-20 s, and the first-token timeout alone is 5 s. A 10 s lock expired under healthy long streams and let waiters make duplicate provider calls. A crashed holder now costs waiters up to 30 s, which only happens if a gateway instance dies mid-request.
+  - *Waiters don't detect "fallback was served" directly.* They can't see another request's context. The parallel-after-failure rule gives the same effect within one poll interval.
+- **f. Dev B's one-line edit to `RedisResponseCache` (description constant) and the `MetricNames.CACHE_ERRORS` javadoc:** accepted, done at the reviewer's request.
+- **g. Dev A's key choices**, accepted:
+  - The canonical JSON is written field by field (a new `ChatRequest` field never enters the key silently).
+  - Schema object keys are sorted and numbers normalised; array order is kept (significant in JSON).
+  - Message text and stop-sequence order are not normalised: either costs a miss, never a wrong hit.
+  - An unparseable schema is hashed raw under its own field name, so it can't collide with a parsed one.
+- **h. No `X-Gateway-Cache` header on an error sent before the first byte:** accepted. The header describes where an answer came from; an error has none. `cache_status` is in the log row and `gateway.cache.lookups`.
+- **Checked in review:**
+  - No entry can hold another tenant's content: the tenant is in the key.
+  - A hit's `model` field is the resolved request model, and the key contains that model, so a replay can't show a different model.
+  - Entry keys (`cache:v1:<hash>`) and lock keys (`lock:cache:v1:<hash>`) can't collide with each other or with `rl:` and `budget:` keys.
+  - Memory is bounded by Redis `maxmemory 128mb` with `volatile-lru`, which evicts cache entries (they have TTLs) before anything else; an eviction is just a miss.
 

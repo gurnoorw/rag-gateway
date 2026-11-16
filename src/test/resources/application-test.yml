@@ -1,0 +1,13 @@
+# Test profile. Datasource and Redis come from Testcontainers (support/AbstractIntegrationTest).
+# Provider base URLs are overridden per test to WireMock. No test reaches a real provider.
+gateway:
+  providers:
+    claude:
+      base-url: http://127.0.0.1:9    # unroutable on purpose; tests that need Claude set WireMock's URL
+      api-key: test-key-not-secret
+    ollama:
+      base-url: http://127.0.0.1:9
+logging:
+  level:
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN

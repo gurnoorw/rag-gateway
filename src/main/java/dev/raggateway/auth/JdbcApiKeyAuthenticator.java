@@ -61,8 +61,15 @@ public final class JdbcApiKeyAuthenticator implements ApiKeyAuthenticator {
     public Optional<ApiKeyPrincipal> authenticate(String presentedKey) {
         if (presentedKey == null || presentedKey.isBlank()) return Optional.empty();
         String hash = ApiKeyHasher.sha256Hex(presentedKey);
-        // A null result from the loader is not stored, so unknown keys are looked up again next time.
-        return Optional.ofNullable(cache.get(hash, this::load));
+        ApiKeyPrincipal cached = cache.getIfPresent(hash);
+        if (cached != null) return Optional.of(cached);
+        // Load outside the cache: Caffeine's get(key, loader) runs the loader inside ConcurrentHashMap.compute,
+        // which is synchronized, so a JDBC call there would pin the virtual thread's carrier (D-03) and block
+        // other keys in the same bin. Two concurrent misses for one key both query; the second put is harmless.
+        // Unknown and revoked keys are not cached, so they are looked up again next time.
+        ApiKeyPrincipal loaded = load(hash);
+        if (loaded != null) cache.put(hash, loaded);
+        return Optional.ofNullable(loaded);
     }
 
     /** Number of cached principals (tests). */

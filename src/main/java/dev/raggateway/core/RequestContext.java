@@ -26,6 +26,7 @@ public final class RequestContext {
     private ChatRequest request;
     private String routeRule;
     private CacheStatus cacheStatus = CacheStatus.NOT_ELIGIBLE;
+    private boolean cacheBypassRequested;
     private final List<Attempt> attempts = new ArrayList<>();
     private long firstTokenNanos = -1;
     private RequestOutcome outcome;
@@ -69,6 +70,11 @@ public final class RequestContext {
     public void setRouteRule(String routeRule) { this.routeRule = routeRule; }
 
     public CacheStatus cacheStatus() { return cacheStatus; }
+
+    /** True when the caller sent {@code X-Gateway-Cache-Bypass: true}; set by the edge (t01), read by the cache (t05). */
+    public boolean cacheBypassRequested() { return cacheBypassRequested; }
+
+    public void setCacheBypassRequested(boolean cacheBypassRequested) { this.cacheBypassRequested = cacheBypassRequested; }
 
     public void setCacheStatus(CacheStatus cacheStatus) { this.cacheStatus = Objects.requireNonNull(cacheStatus); }
 

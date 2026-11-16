@@ -10,6 +10,7 @@ import java.util.List;
  * Content chunks carry a delta; the final chunk carries an empty delta and the finish reason; the
  * optional usage chunk ({@code stream_options.include_usage}) has empty {@code choices} and a {@code usage}.
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public record ChatCompletionChunk(String id, String object, long created, String model,
                                   List<ChunkChoice> choices, UsageDto usage) {
 
@@ -21,6 +22,7 @@ public record ChatCompletionChunk(String id, String object, long created, String
     }
 
     /** Role is sent on the first content chunk only; the final chunk has an empty delta. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Delta(String role, String content) {
     }
 }

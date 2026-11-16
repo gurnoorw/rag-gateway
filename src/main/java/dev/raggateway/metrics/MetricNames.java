@@ -63,6 +63,16 @@ public final class MetricNames {
     /** Timer. Tags: mode (hybrid/vector/keyword). */
     public static final String RETRIEVAL_DURATION = "rag.retrieval.duration";
 
+    // Fixed label values (t04, D-38): a label value must come from a bounded set, never from the request.
+    /** {@code provider} label when no provider was called (rejected before the terminal). */
+    public static final String PROVIDER_NONE = "none";
+    /** {@code provider} label for a request answered from the response cache (t05). */
+    public static final String PROVIDER_CACHE = "cache";
+    /** {@code model} label for a model name that is not in the catalog (e.g. a 400 for an unknown model). */
+    public static final String MODEL_OTHER = "other";
+    /** {@code code} label for a request without an error. */
+    public static final String CODE_NONE = "none";
+
     /** Labels allowed on {@code gateway.*} and {@code rag.*} metrics. Never request ids, keys or free text. */
     public static final Set<String> ALLOWED_LABELS = Set.of(
             "tenant", "provider", "model", "status_class", "code", "direction", "reason", "component",

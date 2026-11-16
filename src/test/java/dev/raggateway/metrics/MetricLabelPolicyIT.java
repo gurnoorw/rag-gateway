@@ -35,7 +35,8 @@ import static org.awaitility.Awaitility.await;
 
 /**
  * AC-t04-3: after mixed traffic (success, stream, unknown model, upstream 400, fallback, exhausted chain, budget 429,
- * bad key, a client-chosen {@code X-Request-Id}), no {@code gateway_*} or {@code rag_*} series on
+ * bad key, a client-chosen {@code X-Request-Id}, a JSON-schema request answered validly and one answered invalidly
+ * twice), no {@code gateway_*} or {@code rag_*} series on
  * {@code /actuator/prometheus} has a label outside {@link MetricNames#ALLOWED_LABELS} (plus {@code le}) or a value
  * outside its bounded set, and no value contains a request id, an API key, prompt text or the raw model string.
  * {@link MetricLabelPolicyTest} shows each rule fails on a scrape that breaks it.
@@ -113,6 +114,25 @@ class MetricLabelPolicyIT extends AbstractIntegrationTest {
         return response;
     }
 
+    /** A {@code json_schema} request (t07); the schema asks for a string {@code answer} and nothing else. */
+    HttpResponse<String> chatWithSchema(String key, String model, String prompt) throws Exception {
+        requestData.add(prompt);
+        var request = HttpRequest.newBuilder(URI.create(baseUrl() + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + key)
+                .timeout(Duration.ofSeconds(30))
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"model":"%s","max_tokens":64,"messages":[{"role":"user","content":"%s"}],
+                         "response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":
+                           {"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],
+                            "additionalProperties":false}}}}""".formatted(model, prompt)))
+                .build();
+        HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        response.headers().firstValue(GatewayHeaders.REQUEST_ID).ifPresent(requestData::add);
+        pipelineRequests++;
+        return response;
+    }
+
     String prompt() {
         return "free text prompt " + UUID.randomUUID();
     }
@@ -160,6 +180,18 @@ class MetricLabelPolicyIT extends AbstractIntegrationTest {
                 .withHeader("Content-Type", "application/json").withBody(OllamaNdjson.errorBody("fake overload"))));
         assertThat(chat(payingKey, HAIKU, false, prompt(), null).statusCode()).isEqualTo(503);
 
+        // t07: a schema request answered with valid JSON, then one answered with invalid JSON twice (502). The output
+        // text is request data too: it must not reach a label.
+        String validOutput = "{\"answer\":\"valid-" + suffix + "\"}";
+        String invalidOutput = "{\"answer\":42,\"invalid-" + suffix + "\":true}";
+        requestData.addAll(Set.of("valid-" + suffix, "invalid-" + suffix));
+        claude(aResponse().withStatus(200).withHeader("Content-Type", "text/event-stream")
+                .withBody(ClaudeSse.reply(HAIKU, 8, 5, validOutput)));
+        assertThat(chatWithSchema(payingKey, HAIKU, prompt()).statusCode()).isEqualTo(200);
+        claude(aResponse().withStatus(200).withHeader("Content-Type", "text/event-stream")
+                .withBody(ClaudeSse.reply(HAIKU, 8, 5, invalidOutput)));
+        assertThat(chatWithSchema(payingKey, HAIKU, prompt()).statusCode()).isEqualTo(502);
+
         await().atMost(Duration.ofSeconds(5)).until(() -> requestsOfOwnTenants() == pipelineRequests);
         PrometheusScrape scrape = PrometheusScrape.fetch(baseUrl());
 
@@ -174,6 +206,8 @@ class MetricLabelPolicyIT extends AbstractIntegrationTest {
         assertThat(scrape.sum("gateway_requests_total", Map.of("tenant", paying, "provider", "ollama",
                 "status_class", "5xx", "code", "all_providers_failed"))).isEqualTo(1.0);
         assertThat(scrape.sum("gateway_ratelimit_rejections_total", Map.of("tenant", suspended))).isEqualTo(1.0);
+        assertThat(scrape.sum("gateway_validation_failures_total", Map.of("model", HAIKU, "kind", "schema")))
+                .isEqualTo(2.0);
 
         assertThat(scrape.labelNames(MetricLabelPolicy::inScope))
                 .isSubsetOf(union(MetricNames.ALLOWED_LABELS, Set.of(MetricLabelPolicy.PROMETHEUS_LE)));

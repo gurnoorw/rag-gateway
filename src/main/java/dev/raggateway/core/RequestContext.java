@@ -112,6 +112,22 @@ public final class RequestContext {
     /** Record one provider attempt. Called by the terminal once per attempt, in order. */
     public void recordAttempt(Attempt attempt) { attempts.add(Objects.requireNonNull(attempt)); }
 
+    /**
+     * Mark the most recent attempt as {@link AttemptOutcome#INVALID_OUTPUT}: the provider completed, but its output
+     * failed JSON-schema or structural validation (t07, C8). Usage, timings and provider stay as recorded, so the
+     * attempt is still billed and logged; only the outcome changes, which keeps the cache from storing it (D-40)
+     * and lets the log show why a second attempt followed.
+     *
+     * @param errorKind short reason for logs, e.g. {@code SCHEMA} or {@code TRUNCATED}
+     * @throws IllegalStateException if no attempt was recorded
+     */
+    public void markLastAttemptInvalid(String errorKind) {
+        if (attempts.isEmpty()) throw new IllegalStateException("no attempt to mark invalid");
+        Attempt a = attempts.remove(attempts.size() - 1);
+        attempts.add(new Attempt(a.provider(), a.model(), a.fallback(), AttemptOutcome.INVALID_OUTPUT, a.usage(),
+                a.usageEstimated(), a.durationNanos(), a.firstTokenNanos(), errorKind));
+    }
+
     /** All provider attempts in order; empty for a cache hit or a request rejected before the provider. */
     public List<Attempt> attempts() { return List.copyOf(attempts); }
 

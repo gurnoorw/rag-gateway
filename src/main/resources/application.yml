@@ -1,0 +1,85 @@
+# rag-gateway configuration. Secrets come from the environment (.env, never committed).
+# Feature sections are added by the task that owns them (docs/process/WORK_PLAN.md); defaults live in
+# each feature's @ConfigurationProperties record, so this file only overrides.
+spring:
+  application:
+    name: rag-gateway
+  threads:
+    virtual:
+      enabled: true            # CLAUDE.md override; request handling on virtual threads (D-03)
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/raggateway}
+    username: ${POSTGRES_USER:raggateway}
+    password: ${POSTGRES_PASSWORD:raggateway}
+    hikari:
+      maximum-pool-size: 10
+      connection-timeout: 2000 # ms; a down database fails a log write fast instead of holding the thread (C7)
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 50ms            # every Redis command; the limiter fails open past this (C24, D-17)
+      connect-timeout: 500ms
+  flyway:
+    enabled: true
+  jackson:
+    default-property-inclusion: non_null
+
+server:
+  port: 8080
+  shutdown: graceful
+  tomcat:
+    max-connections: 10000     # open streams, not threads, are the limit with virtual threads (HLD deep dive 4)
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  pattern:
+    level: "%5p [%X{requestId:-}]"   # request id on every log line (G8)
+
+gateway:
+  default-max-tokens: 1024
+  max-tokens-cap: 8192
+  # Model catalog. Ids and list prices (USD per million tokens) taken on 2026-11-16 from the Anthropic
+  # model table bundled with the claude-api reference (cached 2026-11-03). Re-check before quoting costs.
+  # Keys with dots or colons need the [..] form.
+  models:
+    "[claude-opus-5-5]":
+      provider: claude
+      upstream-id: claude-opus-5-5
+      input-usd-per-mtok: 4.00
+      output-usd-per-mtok: 20.00
+    "[claude-sonnet-5-5]":
+      provider: claude
+      upstream-id: claude-sonnet-5-5
+      input-usd-per-mtok: 2.00
+      output-usd-per-mtok: 10.00
+    "[claude-haiku-5-5]":     # price valid for prompts up to 100K tokens (D-08)
+      provider: claude
+      upstream-id: claude-haiku-5-5
+      input-usd-per-mtok: 0.10
+      output-usd-per-mtok: 0.50
+    "[llama3.2:1b]":           # local fallback, no list price
+      provider: ollama
+      upstream-id: "llama3.2:1b"
+      input-usd-per-mtok: 0
+      output-usd-per-mtok: 0
+  providers:
+    claude:
+      base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+      api-key: ${ANTHROPIC_API_KEY:}
+      connect-timeout: 1s
+      first-token-timeout: 5s
+      idle-timeout: 30s
+    ollama:
+      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      connect-timeout: 1s
+      first-token-timeout: 30s   # cold model load on the laptop
+      idle-timeout: 30s

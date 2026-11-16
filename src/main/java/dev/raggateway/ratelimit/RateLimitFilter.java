@@ -128,7 +128,7 @@ public class RateLimitFilter implements GatewayFilter {
         try {
             spent = budget.spentMicroUsd(tenant.id(), YearMonth.now(clock));
         } catch (RuntimeException e) {
-            failOpen("budget", tenant, "budget check skipped", e);
+            failOpen(FailOpenCounter.BUDGET, tenant, "budget check skipped", e);
             return false;
         }
         return spent >= budgetMicroUsd;
@@ -142,21 +142,21 @@ public class RateLimitFilter implements GatewayFilter {
             try {
                 limiter.refund(tenant.id(), unused, spec);
             } catch (RuntimeException e) {
-                failOpen("limiter", tenant, "refund of " + unused + " tokens lost", e);
+                failOpen(FailOpenCounter.LIMITER, tenant, "refund of " + unused + " tokens lost", e);
             }
         }
         long cost;
         try {
             cost = costs.costMicroUsd(ctx.attempts());
         } catch (RuntimeException e) {
-            failOpen("budget", tenant, "cost not computed", e);
+            failOpen(FailOpenCounter.BUDGET, tenant, "cost not computed", e);
             return;
         }
         if (cost > 0) {
             try {
                 budget.addMicroUsd(tenant.id(), YearMonth.now(clock), cost);
             } catch (RuntimeException e) {
-                failOpen("budget", tenant, "spend of " + cost + " micro-USD not recorded", e);
+                failOpen(FailOpenCounter.BUDGET, tenant, "spend of " + cost + " micro-USD not recorded", e);
             }
         }
     }
@@ -166,7 +166,7 @@ public class RateLimitFilter implements GatewayFilter {
     }
 
     private void failOpen(String component, Tenant tenant, String what, RuntimeException e) {
-        registry.counter(MetricNames.LIMIT_FAIL_OPEN, "component", component).increment();
+        FailOpenCounter.of(registry, component).increment();
         log.warn("rate-limit filter, tenant {}: failed open ({}): {}", tenant.id(), what, e.toString());
     }
 }

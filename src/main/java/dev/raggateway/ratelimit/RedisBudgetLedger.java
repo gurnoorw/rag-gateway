@@ -1,6 +1,5 @@
 package dev.raggateway.ratelimit;
 
-import dev.raggateway.metrics.MetricNames;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -37,9 +36,7 @@ public class RedisBudgetLedger implements BudgetLedger {
 
     public RedisBudgetLedger(StringRedisTemplate redis, MeterRegistry registry) {
         this.redis = Objects.requireNonNull(redis, "redis");
-        this.failOpen = Counter.builder(MetricNames.LIMIT_FAIL_OPEN)
-                .tag("component", "budget")
-                .register(registry);
+        this.failOpen = FailOpenCounter.of(registry, FailOpenCounter.BUDGET);
     }
 
     /** Redis key of a tenant's spend in one UTC month. */

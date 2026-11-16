@@ -58,10 +58,7 @@ public final class FailOpenRateLimiter implements RateLimiter {
         this.fallback = fallback;
         this.nanoClock = nanoClock;
         this.lastWarnNanos = new AtomicLong(nanoClock.getAsLong() - WARN_INTERVAL_NANOS); // first failure warns
-        this.failOpen = Counter.builder(MetricNames.LIMIT_FAIL_OPEN)
-                .description("Redis unavailable; the per-instance fallback was used")
-                .tag("component", "limiter")
-                .register(registry);
+        this.failOpen = FailOpenCounter.of(registry, FailOpenCounter.LIMITER);
     }
 
     @Override

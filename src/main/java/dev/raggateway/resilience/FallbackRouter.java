@@ -168,7 +168,17 @@ public final class FallbackRouter implements Terminal {
         CircuitBreaker breaker = breakers.circuitBreaker(provider.name());
         Retry retry = retries.retry(provider.name());
         int[] attemptNumber = {0};
-        CheckedRunnable attempt = () -> runAttempt(ctx, sink, provider, request, fallback, ++attemptNumber[0]);
+        long[] lastAttemptEnd = {-1};
+        CheckedRunnable attempt = () -> {
+            // The gap since the previous attempt on this provider is the retry backoff: a deliberate wait, not
+            // gateway work, so it is excluded from gateway overhead (D-39).
+            if (lastAttemptEnd[0] >= 0) ctx.addWaitNanos(nanoClock.getAsLong() - lastAttemptEnd[0]);
+            try {
+                runAttempt(ctx, sink, provider, request, fallback, ++attemptNumber[0]);
+            } finally {
+                lastAttemptEnd[0] = nanoClock.getAsLong();
+            }
+        };
         try {
             Retry.decorateCheckedRunnable(retry, CircuitBreaker.decorateCheckedRunnable(breaker, attempt)).run();
             return new StepResult.Succeeded();

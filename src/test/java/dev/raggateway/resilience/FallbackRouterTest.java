@@ -477,6 +477,21 @@ class FallbackRouterTest {
     }
 
     @Test
+    void retryBackoffIsRecordedAsAWaitOnTheContextAndAMoveOnIsNot() {
+        var props = new FallbackProperties(CHAIN, 2, null, null, Duration.ofMillis(200), null);
+        var fixture = new RouterFixture(List.of(claude, ollama), props);
+        claude.enqueue(fail(httpError(429, true, Duration.ofMillis(60))))
+                .enqueue(fail(httpError(500, true, null)));
+        ollama.enqueue(FakeLlmProvider.reply("ok"));
+        RequestContext ctx = ctx(OPUS);
+
+        fixture.router.call(ctx, new Sink());
+
+        // One backoff (honouring Retry-After 60 ms) between the two Claude attempts; none for the move to Ollama.
+        assertThat(Duration.ofNanos(ctx.waitNanos())).isBetween(Duration.ofMillis(55), Duration.ofMillis(1_000));
+    }
+
+    @Test
     void theFirstRetryWaitsUpToTheBaseAndEachLaterOneDoublesTheWindow() {
         // Resilience4j numbers the first retry 1, so its window is base × 2^0 (D-07). Highest draw = the ceiling.
         var props = new FallbackProperties(CHAIN, 3, Duration.ofMillis(2), Duration.ofMillis(100), null, null);

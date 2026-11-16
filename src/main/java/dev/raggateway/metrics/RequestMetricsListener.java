@@ -23,10 +23,14 @@ import java.util.function.LongSupplier;
  *   <li>{@code gateway.request.duration{provider,model}}: start to {@link RequestContext#finishNanos()} (D-31), the
  *       same end point as the request-log row's {@code latency_ms}.</li>
  *   <li>{@code gateway.request.ttft{provider,model}}: start to the first token handed to the client sink; only
- *       recorded when a token was sent.</li>
+ *       recorded when a token was sent. For {@code stream:false} that is when the first token reached the JSON
+ *       sink's buffer, not when the client received a byte (the body is sent at the end).</li>
  *   <li>{@code gateway.overhead{provider}}: total minus the sum of every attempt's duration (retries and fallbacks
- *       included), i.e. time spent in the gateway itself. A cache hit or a rejected request has no attempt, so its
- *       overhead is its total time.</li>
+ *       included) minus deliberate waits ({@link RequestContext#waitNanos()}: retry backoff, later the cache fill
+ *       wait), i.e. time spent in the gateway's own work: auth, parsing, filters, Redis and database calls on the
+ *       path, error rendering, closing the response (D-39). Writing tokens to the client happens inside an
+ *       attempt and is not overhead. A cache hit or a rejected request has no attempt, so its overhead is its
+ *       total time minus waits.</li>
  *   <li>{@code gateway.tokens{tenant,model,direction}}: each attempt's usage under that attempt's model, so the
  *       counters sum to {@link RequestContext#billedUsage()} (the log row and the budget).</li>
  *   <li>{@code gateway.cost.usd{tenant}}: {@link CostCalculator#costMicroUsd} of all attempts, the amount the log
@@ -99,9 +103,9 @@ public final class RequestMetricsListener implements RequestCompletionListener {
         long providerNanos = 0;
         for (Attempt a : ctx.attempts()) providerNanos += Math.max(0, a.durationNanos());
         Timer.builder(MetricNames.GATEWAY_OVERHEAD)
-                .description("Request time not spent in provider attempts")
+                .description("Request time spent in the gateway itself: total minus provider attempts and deliberate waits (D-39)")
                 .tags("provider", provider)
-                .register(registry).record(Math.max(0, total - providerNanos), TimeUnit.NANOSECONDS);
+                .register(registry).record(Math.max(0, total - providerNanos - ctx.waitNanos()), TimeUnit.NANOSECONDS);
 
         for (Attempt a : ctx.attempts()) {
             String attemptModel = modelLabel(a.model());

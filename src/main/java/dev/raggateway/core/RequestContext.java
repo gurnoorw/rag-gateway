@@ -33,6 +33,7 @@ public final class RequestContext {
     private String currentModel;
     private boolean currentFallback;
     private long finishNanos = -1;
+    private long waitNanos;
     private RequestOutcome outcome;
     private ErrorCode errorCode;
     private int httpStatus;
@@ -159,6 +160,18 @@ public final class RequestContext {
 
     /** {@link System#nanoTime()} when the request finished, or -1 before {@link #finish}. */
     public long finishNanos() { return finishNanos; }
+
+    /**
+     * Add time the request spent in a deliberate wait that is neither gateway work nor a provider call: the
+     * backoff between retries (t03) and, later, waiting for another request to fill the cache (t05). Gateway
+     * overhead excludes it (D-39).
+     */
+    public void addWaitNanos(long nanos) {
+        if (nanos > 0) waitNanos += nanos;
+    }
+
+    /** Total deliberate wait time recorded with {@link #addWaitNanos}. */
+    public long waitNanos() { return waitNanos; }
 
     /** Null until the pipeline finished the request. */
     public RequestOutcome outcome() { return outcome; }

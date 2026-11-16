@@ -174,6 +174,23 @@ class RequestMetricsListenerTest {
     }
 
     @Test
+    void overheadExcludesRetryBackoffAndOtherDeliberateWaits() {
+        var ctx = ctx("acme", OPUS);
+        ctx.recordAttempt(attempt("claude", OPUS, false, AttemptOutcome.FAILED_BEFORE_FIRST_TOKEN, 0, 0, 1_000));
+        ctx.addWaitNanos(250 * MS); // the router's backoff before the second attempt (D-39)
+        ctx.recordAttempt(attempt("claude", OPUS, false, AttemptOutcome.SUCCEEDED, 10, 2, 500));
+        ctx.markFirstTokenSent(START + 1_700 * MS);
+        ctx.finish(RequestOutcome.SUCCESS, null, 200, START + 1_760 * MS);
+
+        listener.onRequestFinished(ctx);
+
+        assertThat(timer(MetricNames.GATEWAY_OVERHEAD, "provider", "claude").totalTime(TimeUnit.MILLISECONDS))
+                .as("1760 − (1000 + 500) − 250 wait").isEqualTo(10.0);
+        assertThat(timer(MetricNames.REQUEST_DURATION, "provider", "claude", "model", OPUS).totalTime(TimeUnit.MILLISECONDS))
+                .as("the user still waited the whole time").isEqualTo(1_760.0);
+    }
+
+    @Test
     void costEqualsTheCostCalculatorsAmount() {
         var ctx = ctx("acme", OPUS);
         ctx.recordAttempt(attempt("claude", OPUS, false, AttemptOutcome.SUCCEEDED, 1_000, 500, 10));

@@ -70,6 +70,9 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-31 | Request latency end point | frozen at `RequestContext.finish`, not at log time |
 | D-32 | Environment variable names | `GATEWAY_CLAUDE_*`, `GATEWAY_OLLAMA_BASE_URL`, not the `ANTHROPIC_*` names |
 | D-33 | t02 settlement and usage details | settle from billed usage of all attempts; no extra debit on under-estimate; rejected requests logged; `/v1/usage` contract |
+| D-34 | Billing a failure before the first token | HTTP error status → zero usage; timeout or broken connection → estimated input |
+| D-35 | Integration test bases | shared-Redis base separate from own-Redis base; unregistered Redis fails loudly |
+| D-36 | t02 review rulings | too-large before budget; budget 0 blocks; unknown model priced 0 with ERROR; one fail-open counter |
 
 ---
 
@@ -368,6 +371,10 @@ Base package `dev.raggateway`, by feature: `api` (HTTP edge, wire DTOs, client s
 - **Decision:** command timeout 50 ms for all Redis use (limiter, budget, cache); Lettuce `disconnectedBehavior = REJECT_COMMANDS` so a down Redis fails immediately instead of queueing; on any Redis error the limiter falls back to the per-instance in-memory bucket, the budget check is skipped, and the cache reads as a miss, each with a `gateway.ratelimit.failopen` or `gateway.cache.errors` count and a WARN log. Compose runs Redis with AOF (`everysec`), `maxmemory 128mb`, `maxmemory-policy volatile-lru`; budget keys have no TTL so they are never evicted; bucket and cache keys have TTLs.
 - **Reason:** fail open for internal traffic (HLD deep dive 1) with a hard bound on added latency; budgets survive a Redis restart.
 - **Consequences:** while Redis is down, N gateway instances admit up to N × the tenant limit and spend is not counted; losing Redis data resets the month's counter (recovery = sum from `request_log`, not built).
+- **Amended in the t02 review:**
+  - *Client-side timeout, server-side run.* A Lua script that exceeds the 50 ms client timeout has still been sent; if Redis is only slow, it runs later. The request is then charged twice (Redis bucket and in-memory bucket): over-limiting, never under-limiting, and it refills. The mirror case, a refund that times out and is also applied locally, over-credits by at most that refund, capped at capacity. Accepted; making scripts idempotent per request id would add a key per request for a sub-second edge case.
+  - *No reconciliation across a switch.* The Redis and in-memory buckets are independent; a reservation taken on one side and refunded on the other moves at most one reservation per in-flight request. Accepted.
+  - *Redis unreachable from start.* A refused connection fails at once (and `REJECT_COMMANDS` covers a dropped one), but a black-holed host costs up to the 500 ms connect timeout per Redis call. Not fixed now: t08 measures it (scenario 6b). If the added latency exceeds 50 ms per request, the fix is a short skip window (after a Redis failure, go straight to the fallback for ~1 s), recorded then.
 
 ### D-18. Embedder in this environment
 - **Decision:** a deterministic fake embedder (768 dims, derived from a hash of the text, L2-normalised) is the default under the `test` profile and selectable for local runs without Ollama (`gateway.rag.embedder=fake`); the Ollama embedder is the default otherwise. Every number produced with the fake is labelled "fake embedder, not a model".
@@ -466,4 +473,24 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
 - **Reason:** one source of truth for what a request cost (log row = budget increment); output tokens are capped by `max_tokens`, so the only possible overshoot comes from the input estimate, and taking more tokens after the fact would let the bucket go negative for an error the tenant did not make.
 - **Rejected:** debiting the bucket for the under-estimate (punishes the tenant for our estimator); settling from the last attempt only (failed validation attempts would be free, contradicting C8).
 - **Consequences:** a 429 counts as a request in `/v1/usage`; 429 correctness in t08 is computed from these rows.
+
+### D-34. Billing a provider failure before the first token
+- **Context:** AC-t02-5 says a failed provider call gets its full reservation back. D-33 bills every attempt's usage, and the t01 terminal recorded an estimated input for every failure, so a provider 500 still cost the tenant its input estimate.
+- **Decision:** an attempt that ends with an HTTP error status before any token (`FAILED_BEFORE_FIRST_TOKEN`, kind `HTTP_STATUS`) is recorded with zero usage, not estimated, so the whole reservation is refunded and the budget is not charged. A timeout or broken connection before the first token keeps the estimated input (flagged `usage_estimated`), because the provider may already have accepted and processed the prompt. Failures after the first token keep input estimate plus streamed text.
+- **Reason:** providers do not bill error responses; charging the tenant for them punishes the tenant for a provider fault. Where the gateway cannot know, it errs towards charging the input, which is what the provider most likely bills.
+- **Rejected:** estimated input for every failure (contradicts AC-t02-5); zero for every pre-token failure (under-counts real spend on timeouts after the provider started work).
+- **Consequences:** the t03 router records retried and fallen-back attempts with the same rule (one helper, `DirectProviderTerminal.billedNothing`, moves to the router).
+
+### D-35. Integration test bases
+- **Context:** Spring applies a superclass's `@DynamicPropertySource` after a subclass's, so `AbstractIntegrationTest`'s shared-Redis registration silently won over a subclass that registered its own Redis.
+- **Decision:** `AbstractAppTest` (full app, shared Postgres, **no** Redis registration) and `AbstractIntegrationTest extends AbstractAppTest` (adds the shared Redis). Tests that need their own Redis extend `AbstractAppTest` and register it. `application-test.yml` points Redis at an `.invalid` host, so a test that registers none fails loudly instead of reaching a Redis it did not mean to use.
+- **Rejected:** documenting the trap only (it fails silently); a per-test opt-out flag (a static `@DynamicPropertySource` cannot see the test class).
+
+### D-36. t02 review rulings
+- **Wiring change outside the owner's files:** Dev B's one-line change to `config/CoreConfig.java` (pass `CostCalculator` to `RequestLogWriter`) is accepted; D-33 requires it and the developer reported it. Rule stands: say so in the branch notes when a change outside your files is unavoidable.
+- **`gateway.rate-limit.refill-period`:** accepted. Default 1 minute (long-run rate = TPM); tests shorten it to make `Retry-After` about a second without changing capacity (C24). Production config must keep 1 minute.
+- **Too-large check before the budget check:** accepted. A request that can never fit is a 400 whatever the budget, and the check costs no Redis call.
+- **`spent >= budget` rejects, so a budget of 0 blocks every request:** accepted; a 0 budget means "suspended tenant". Documented in the README limitations.
+- **Unknown model priced 0 with an ERROR log:** accepted. It cannot happen while model selection admits only catalog models and `PriceTable` requires prices for every catalog model at startup; failing settlement or the log row instead would lose more information than it protects.
+- **Fail-open counter:** all three call sites now register `gateway.ratelimit.failopen` through `FailOpenCounter.of(registry, component)`, with one description and the components `limiter` and `budget`.
 

@@ -23,6 +23,7 @@
 # were already running), also on failure or Ctrl-C. It never calls a real provider: the bench profile points
 # both providers at the mocks, with no environment override.
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1   # no __pycache__ under bench/lib (not gitignored)
 
 usage() { sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 

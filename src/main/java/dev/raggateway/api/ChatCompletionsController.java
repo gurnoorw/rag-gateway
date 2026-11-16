@@ -13,7 +13,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -37,8 +36,7 @@ public class ChatCompletionsController {
     private final ObjectMapper json;
     private final GatewayProperties properties;
 
-    /** The pipeline is resolved on first use (it is provided by the core configuration). */
-    public ChatCompletionsController(ChatRequestMapper mapper, @Lazy GatewayPipeline pipeline, ObjectMapper json,
+    public ChatCompletionsController(ChatRequestMapper mapper, GatewayPipeline pipeline, ObjectMapper json,
                                      GatewayProperties properties) {
         this.mapper = mapper;
         this.pipeline = pipeline;

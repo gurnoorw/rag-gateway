@@ -4,6 +4,9 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import dev.raggateway.config.RedisHealthGate;
+import dev.raggateway.config.RedisSkipped;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
@@ -32,11 +35,21 @@ public class RedisBudgetLedger implements BudgetLedger {
 
     private final StringRedisTemplate redis;
     private final Counter failOpen;
+    private final RedisHealthGate gate;
+    private final Counter skipped;
     private final AtomicLong lastWarnNanos = new AtomicLong(System.nanoTime() - WARN_INTERVAL_NANOS);
 
     public RedisBudgetLedger(StringRedisTemplate redis, MeterRegistry registry) {
+        this(redis, registry, RedisHealthGate.alwaysPass());
+    }
+
+    /** @param gate skip window shared with the other Redis users (D-46) */
+    @Autowired
+    public RedisBudgetLedger(StringRedisTemplate redis, MeterRegistry registry, RedisHealthGate gate) {
         this.redis = Objects.requireNonNull(redis, "redis");
+        this.gate = Objects.requireNonNull(gate, "gate");
         this.failOpen = FailOpenCounter.of(registry, FailOpenCounter.BUDGET);
+        this.skipped = RedisSkipped.of(registry, RedisSkipped.BUDGET);
     }
 
     /** Redis key of a tenant's spend in one UTC month. */
@@ -47,10 +60,16 @@ public class RedisBudgetLedger implements BudgetLedger {
     /** Spend so far in micro-USD; 0 when nothing was spent or when Redis failed (the check is then skipped). */
     @Override
     public long spentMicroUsd(String tenantId, YearMonth month) {
+        if (!gate.tryPass()) {
+            skipped.increment();
+            return 0;
+        }
         try {
             String value = redis.opsForValue().get(key(tenantId, month));
+            gate.success();
             return value == null ? 0 : Long.parseLong(value);
         } catch (RuntimeException e) {
+            gate.failure();
             failedOpen("read", tenantId, e);
             return 0;
         }
@@ -60,9 +79,15 @@ public class RedisBudgetLedger implements BudgetLedger {
     @Override
     public void addMicroUsd(String tenantId, YearMonth month, long microUsd) {
         if (microUsd <= 0) return;
+        if (!gate.tryPass()) {
+            skipped.increment(); // the spend is not recorded in Redis; the request-log row still has it
+            return;
+        }
         try {
             redis.opsForValue().increment(key(tenantId, month), microUsd);
+            gate.success();
         } catch (RuntimeException e) {
+            gate.failure();
             failedOpen("add " + microUsd + " micro-USD to", tenantId, e);
         }
     }

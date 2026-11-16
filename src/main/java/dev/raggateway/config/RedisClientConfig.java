@@ -21,6 +21,12 @@ import org.springframework.context.annotation.Configuration;
 @Configuration(proxyBeanMethods = false)
 public class RedisClientConfig {
 
+    /** One gate for every Redis user on the request path (limiter, budget, cache), D-46. */
+    @Bean
+    RedisHealthGate redisHealthGate(RedisGateProperties properties) {
+        return new RedisHealthGate(properties.skipWindow(), System::nanoTime);
+    }
+
     @Bean
     LettuceClientOptionsBuilderCustomizer rejectCommandsWhenDisconnected() {
         return RedisClientConfig::applyClientOptions;

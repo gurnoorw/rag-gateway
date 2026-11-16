@@ -1,5 +1,7 @@
 package dev.raggateway.ratelimit;
 
+import dev.raggateway.config.RedisHealthGate;
+import dev.raggateway.config.RedisSkipped;
 import dev.raggateway.metrics.MetricNames;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -19,7 +21,10 @@ import java.util.function.LongSupplier;
  * open on purpose: a Redis outage degrades the limit to "per instance" instead of failing requests
  * (HLD deep dive 1). While Redis is down, N instances admit up to N x the tenant limit.
  *
- * <p>Every fallback increments {@code gateway.ratelimit.failopen{component=limiter}}; a WARN is logged at
+ * <p>After a Redis failure the shared {@link RedisHealthGate} skips Redis for a short window (D-46), so a black-holed
+ * Redis costs one connect timeout per window instead of one per request; skipped calls count as
+ * {@code gateway.redis.skipped{component=limiter}}. Every Redis failure increments
+ * {@code gateway.ratelimit.failopen{component=limiter}}; a WARN is logged at
  * most once per 10 s so an outage does not flood the log. A refund that fails on Redis goes to the
  * in-memory bucket and never throws (D-33).
  *
@@ -37,6 +42,8 @@ public final class FailOpenRateLimiter implements RateLimiter {
 
     private static final Logger log = LoggerFactory.getLogger(FailOpenRateLimiter.class);
 
+    private final RedisHealthGate gate;
+    private final Counter skipped;
     private final RateLimiter primary;
     private final RateLimiter fallback;
     private final Counter failOpen;
@@ -44,8 +51,9 @@ public final class FailOpenRateLimiter implements RateLimiter {
     private final AtomicLong lastWarnNanos;
 
     @Autowired
-    public FailOpenRateLimiter(RedisTokenBucketLimiter redis, InMemoryTokenBucketLimiter local, MeterRegistry registry) {
-        this(redis, local, registry, System::nanoTime);
+    public FailOpenRateLimiter(RedisTokenBucketLimiter redis, InMemoryTokenBucketLimiter local, MeterRegistry registry,
+                               RedisHealthGate gate) {
+        this(redis, local, registry, System::nanoTime, gate);
     }
 
     /**
@@ -54,6 +62,14 @@ public final class FailOpenRateLimiter implements RateLimiter {
      * @param nanoClock monotonic time, for the WARN rate limit; tests pass a controllable one
      */
     public FailOpenRateLimiter(RateLimiter primary, RateLimiter fallback, MeterRegistry registry, LongSupplier nanoClock) {
+        this(primary, fallback, registry, nanoClock, RedisHealthGate.alwaysPass());
+    }
+
+    /** @param gate skip window shared with the other Redis users (D-46) */
+    public FailOpenRateLimiter(RateLimiter primary, RateLimiter fallback, MeterRegistry registry, LongSupplier nanoClock,
+                               RedisHealthGate gate) {
+        this.gate = java.util.Objects.requireNonNull(gate, "gate");
+        this.skipped = RedisSkipped.of(registry, RedisSkipped.LIMITER);
         this.primary = primary;
         this.fallback = fallback;
         this.nanoClock = nanoClock;
@@ -64,9 +80,16 @@ public final class FailOpenRateLimiter implements RateLimiter {
     @Override
     public Decision tryAcquire(String bucketKey, long tokens, BucketSpec spec) {
         TokenBucket.checkRequested(tokens, spec); // the caller's error, not Redis's: never falls back
+        if (!gate.tryPass()) {
+            skipped.increment();
+            return fallback.tryAcquire(bucketKey, tokens, spec);
+        }
         try {
-            return primary.tryAcquire(bucketKey, tokens, spec);
+            Decision decision = primary.tryAcquire(bucketKey, tokens, spec);
+            gate.success();
+            return decision;
         } catch (RuntimeException e) {
+            gate.failure();
             onFailure("acquire", e);
             return fallback.tryAcquire(bucketKey, tokens, spec);
         }
@@ -75,9 +98,20 @@ public final class FailOpenRateLimiter implements RateLimiter {
     @Override
     public void refund(String bucketKey, long tokens, BucketSpec spec) {
         if (tokens < 0) throw new IllegalArgumentException("refund must be >= 0");
+        if (!gate.tryPass()) {
+            skipped.increment();
+            try {
+                fallback.refund(bucketKey, tokens, spec);
+            } catch (RuntimeException fallbackError) {
+                log.warn("In-memory refund failed for bucket {}: {}", bucketKey, fallbackError.toString());
+            }
+            return;
+        }
         try {
             primary.refund(bucketKey, tokens, spec);
+            gate.success();
         } catch (RuntimeException e) {
+            gate.failure();
             onFailure("refund", e);
             try {
                 fallback.refund(bucketKey, tokens, spec);

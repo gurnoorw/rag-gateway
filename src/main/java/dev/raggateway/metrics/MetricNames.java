@@ -35,6 +35,13 @@ public final class MetricNames {
     /** Counter. Tags: component (limiter/budget). Redis unavailable, local fallback used. */
     public static final String LIMIT_FAIL_OPEN = "gateway.ratelimit.failopen";
 
+    /** Gauge. {@code /v1} requests being served by this instance (D-46). */
+    public static final String REQUESTS_IN_FLIGHT = "gateway.requests.in_flight";
+    /** Counter. {@code /v1} requests refused with 503 {@code overloaded} at the in-flight limit (D-46). */
+    public static final String REQUESTS_SHED = "gateway.requests.shed";
+    /** Counter. Tags: component (limiter/budget/cache). Redis calls skipped because the skip window is closed (D-46). */
+    public static final String REDIS_SKIPPED = "gateway.redis.skipped";
+
     // t03 (breaker state comes from resilience4j-micrometer: resilience4j.circuitbreaker.state, tag name)
     /** Counter. Tags: provider. */
     public static final String PROVIDER_RETRIES = "gateway.provider.retries";

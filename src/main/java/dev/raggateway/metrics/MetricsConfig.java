@@ -1,6 +1,7 @@
 package dev.raggateway.metrics;
 
 import dev.raggateway.config.GatewayProperties;
+import dev.raggateway.config.RedisSkipped;
 import dev.raggateway.cost.CostCalculator;
 import dev.raggateway.ratelimit.FailOpenCounter;
 import io.micrometer.core.instrument.Counter;
@@ -112,6 +113,7 @@ public class MetricsConfig {
 
     /** Fixed-label counters at 0 (D-38). Registering an existing counter returns it unchanged. */
     static void registerZeroCounters(MeterRegistry registry) {
+        for (String component : RedisSkipped.COMPONENTS) RedisSkipped.of(registry, component);
         FailOpenCounter.of(registry, FailOpenCounter.LIMITER);
         FailOpenCounter.of(registry, FailOpenCounter.BUDGET);
         Counter.builder(MetricNames.REQUEST_LOG_WRITE_FAILURES)

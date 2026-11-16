@@ -54,7 +54,7 @@ final class MetricLabelPolicy {
                 Map.entry("status_class", Set.of("2xx", "4xx", "5xx")::contains),
                 Map.entry("code", union(codes, Set.of(MetricNames.CODE_NONE))::contains),
                 Map.entry("direction", Set.of(RequestMetricsListener.IN, RequestMetricsListener.OUT)::contains),
-                Map.entry("component", Set.of("limiter", "budget")::contains),
+                Map.entry("component", Set.of("limiter", "budget", "cache")::contains),
                 Map.entry("reason", Set.of("rate_limited", "budget_exceeded", "too_large")::contains),
                 Map.entry("listener", v -> JAVA_SIMPLE_NAME.matcher(v).matches()),
                 Map.entry(PROMETHEUS_LE, v -> NUMBER.matcher(v).matches()));

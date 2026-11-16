@@ -117,9 +117,11 @@ class RateLimitRedisDownE2EIT {
                 HttpResponse.BodyHandlers.ofString());
     }
 
+    /** Fail-open decisions: a failed Redis call, or a call skipped inside the D-46 skip window. */
     double failOpen(String component) {
-        var counter = registry.find(MetricNames.LIMIT_FAIL_OPEN).tag("component", component).counter();
-        return counter == null ? 0 : counter.count();
+        var failed = registry.find(MetricNames.LIMIT_FAIL_OPEN).tag("component", component).counter();
+        var skipped = registry.find(MetricNames.REDIS_SKIPPED).tag("component", component).counter();
+        return (failed == null ? 0 : failed.count()) + (skipped == null ? 0 : skipped.count());
     }
 
     @Test

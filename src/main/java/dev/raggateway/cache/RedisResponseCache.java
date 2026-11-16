@@ -8,6 +8,9 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import dev.raggateway.config.RedisHealthGate;
+import dev.raggateway.config.RedisSkipped;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
@@ -64,6 +67,8 @@ public class RedisResponseCache implements ResponseCache {
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
 
     private final StringRedisTemplate redis;
+    private final RedisHealthGate gate;
+    private final Counter skipped;
     private final Counter getErrors;
     private final Counter putErrors;
     private final Counter lockErrors;
@@ -71,6 +76,14 @@ public class RedisResponseCache implements ResponseCache {
     private final AtomicLong lastWarnNanos = new AtomicLong(System.nanoTime() - WARN_INTERVAL_NANOS);
 
     public RedisResponseCache(StringRedisTemplate redis, MeterRegistry registry) {
+        this(redis, registry, RedisHealthGate.alwaysPass());
+    }
+
+    /** @param gate skip window shared with the other Redis users (D-46) */
+    @Autowired
+    public RedisResponseCache(StringRedisTemplate redis, MeterRegistry registry, RedisHealthGate gate) {
+        this.gate = Objects.requireNonNull(gate, "gate");
+        this.skipped = RedisSkipped.of(registry, RedisSkipped.CACHE);
         this.redis = Objects.requireNonNull(redis, "redis");
         this.getErrors = errorCounter(registry, "get");
         this.putErrors = errorCounter(registry, "put");
@@ -85,10 +98,19 @@ public class RedisResponseCache implements ResponseCache {
 
     @Override
     public Optional<CachedResponse> get(String key) {
+        if (!pass()) return Optional.empty();
+        String json;
         try {
-            String json = redis.opsForValue().get(key);
+            json = redis.opsForValue().get(key);
+            gate.success();
+        } catch (Exception e) { // DataAccessException (down, timeout)
+            gate.failure();
+            failedOpen(getErrors, "get", e);
+            return Optional.empty();
+        }
+        try {
             return json == null ? Optional.empty() : Optional.of(JSON.readValue(json, CachedResponse.class));
-        } catch (Exception e) { // DataAccessException (down, timeout) or a value that does not parse
+        } catch (Exception e) { // a stored value that does not parse: Redis is fine, the entry is not
             failedOpen(getErrors, "get", e);
             return Optional.empty();
         }
@@ -98,9 +120,12 @@ public class RedisResponseCache implements ResponseCache {
     public void put(String key, CachedResponse value, Duration ttl) {
         Objects.requireNonNull(value, "value");
         long ttlMillis = millis(ttl);
+        if (!pass()) return;
         try {
             redis.opsForValue().set(key, JSON.writeValueAsString(value), ttlMillis, TimeUnit.MILLISECONDS);
+            gate.success();
         } catch (Exception e) {
+            gate.failure();
             failedOpen(putErrors, "put", e);
         }
     }
@@ -109,11 +134,14 @@ public class RedisResponseCache implements ResponseCache {
     public Optional<String> tryLock(String key, Duration ttl) {
         long ttlMillis = millis(ttl);
         String token = UUID.randomUUID().toString();
+        if (!pass()) return Optional.of(FAILED_OPEN);
         try {
             Boolean acquired = redis.opsForValue().setIfAbsent(lockKey(key), token, ttlMillis, TimeUnit.MILLISECONDS);
             if (acquired == null) throw new IllegalStateException("SET NX returned no reply");
+            gate.success();
             return acquired ? Optional.of(token) : Optional.empty();
         } catch (Exception e) {
+            gate.failure();
             failedOpen(lockErrors, "lock", e);
             return Optional.of(FAILED_OPEN);
         }
@@ -122,11 +150,21 @@ public class RedisResponseCache implements ResponseCache {
     @Override
     public void unlock(String key, String token) {
         if (token == null || FAILED_OPEN.equals(token)) return;
+        if (!pass()) return; // the lock expires by its TTL
         try {
             redis.execute(COMPARE_AND_DELETE, List.of(lockKey(key)), token);
+            gate.success();
         } catch (Exception e) {
+            gate.failure();
             failedOpen(unlockErrors, "unlock", e); // the lock expires by its TTL
         }
+    }
+
+    /** False while the skip window is closed (D-46): the caller fails open without touching Redis. */
+    private boolean pass() {
+        if (gate.tryPass()) return true;
+        skipped.increment();
+        return false;
     }
 
     private static long millis(Duration ttl) {

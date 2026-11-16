@@ -17,6 +17,7 @@ class RedisClientConfigTest {
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(RedisAutoConfiguration.class))
             .withUserConfiguration(RedisClientConfig.class)
+            .withBean(RedisGateProperties.class, () -> new RedisGateProperties(Duration.ofSeconds(1)))
             .withPropertyValues("spring.data.redis.timeout=50ms", "spring.data.redis.connect-timeout=500ms");
 
     @Test

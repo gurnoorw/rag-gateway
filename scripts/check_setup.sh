@@ -57,8 +57,8 @@ command -v k6 >/dev/null && ok "k6 $(k6 version 2>/dev/null | awk '{print $2}')"
 
 echo "== Claude Code and API key"
 command -v claude >/dev/null && ok "Claude Code CLI" || warn "Claude Code CLI not found: see docs.claude.com (Claude Code > install)"
-[ -n "$ANTHROPIC_API_KEY" ] && ok "ANTHROPIC_API_KEY is set in this shell" \
-  || warn "ANTHROPIC_API_KEY not set. Create a key in console.anthropic.com with a monthly spend limit; put it in the repo's .env (gitignored), never in code"
+grep -qE '^GATEWAY_CLAUDE_API_KEY=.+' .env 2>/dev/null && ok "GATEWAY_CLAUDE_API_KEY is set in .env" \
+  || warn "GATEWAY_CLAUDE_API_KEY not set in .env. Create a key in console.anthropic.com with a monthly spend limit; put it in the repo's .env (gitignored), never in code"
 
 echo "== Memory right now"
 pressure=$(memory_pressure 2>/dev/null | grep -i "free percentage" | awk '{print $NF}')

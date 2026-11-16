@@ -71,15 +71,17 @@ gateway:
       upstream-id: "llama3.2:1b"
       input-usd-per-mtok: 0
       output-usd-per-mtok: 0
+  # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
+  # tools on the same machine, which could silently point the gateway at another host or account.
   providers:
     claude:
-      base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
-      api-key: ${ANTHROPIC_API_KEY:}
+      base-url: ${GATEWAY_CLAUDE_BASE_URL:https://api.anthropic.com}
+      api-key: ${GATEWAY_CLAUDE_API_KEY:}
       connect-timeout: 1s
       first-token-timeout: 5s
       idle-timeout: 30s
     ollama:
-      base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
+      base-url: ${GATEWAY_OLLAMA_BASE_URL:http://localhost:11434}
       connect-timeout: 1s
       first-token-timeout: 30s   # cold model load on the laptop
       idle-timeout: 30s

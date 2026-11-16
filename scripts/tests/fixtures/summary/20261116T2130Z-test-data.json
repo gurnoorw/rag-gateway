@@ -1,0 +1,60 @@
+{
+  "run_id": "20261116T2130Z-test-data",
+  "measured_on": "test data, not a measurement",
+  "date": "2026-11-16",
+  "git_commit": "0000000",
+  "setup": {
+    "jvm_xmx": "512m",
+    "virtual_threads": true,
+    "mock_latency": "test data, not a measurement",
+    "load_generator_shares_host": true,
+    "k6_image": "grafana/k6:2.3.0",
+    "price_date": "2026-11-16",
+    "notes": "test data, not a measurement: fixture for scripts/tests/test_check_readme_numbers.py"
+  },
+  "scenarios": {
+    "overhead": {
+      "requests": 10234,
+      "added_latency_seen_by_client_ms": {
+        "ttfb": {"p50": 1.04, "p95": 3.95, "p99": 12.25},
+        "total": {"p50": 2.0, "p95": 4.44, "p99": 9.99}
+      },
+      "gateway_processing_overhead_ms": {"p50": 0.8, "p95": 1.7, "p99": 4.05}
+    },
+    "cache_hit_rate": {
+      "configured_repeat_share": 0.5,
+      "measured_hit_rate": 0.49875,
+      "requests": 2000
+    },
+    "cost_per_1k": {
+      "label": "modelled from list prices on a synthetic workload",
+      "baseline_usd": 0.123456,
+      "cache_usd": 0.06125,
+      "routing_usd": 0.01,
+      "cache_and_routing_usd": 0.00505,
+      "requests_per_run": 1000
+    },
+    "fallback": {
+      "primary_killed_at_s": 30.0,
+      "requests_after_kill": 600,
+      "success_rate_after_kill": 0.98765,
+      "added_latency_ms": {"p50": 210.0, "p95": 450.55, "p99": 900.0}
+    },
+    "rate_limit": {
+      "over_limit_requests": 40,
+      "with_429_and_retry_after": 40,
+      "share_correct": 1.0,
+      "admitted_tokens_per_min": 999.5,
+      "limit_tokens_per_min": 1000
+    },
+    "open_streams": {
+      "heap": "512m",
+      "stream_seconds": 5,
+      "max_n_zero_errors": 1000,
+      "runs": [
+        {"n": 500, "errors": 0, "peak_heap_used_mb": 150.25, "peak_virtual_threads": 1020, "pinned_reports": 0},
+        {"n": 1000, "errors": 0, "peak_heap_used_mb": 210.75, "peak_virtual_threads": 2040, "pinned_reports": 0}
+      ]
+    }
+  }
+}

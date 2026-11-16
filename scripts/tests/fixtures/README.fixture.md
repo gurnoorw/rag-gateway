@@ -1,0 +1,29 @@
+# Fixture README for scripts/tests (test data, not a measurement)
+
+Some prose with a figure: the timeout is 5 s and the cache TTL is 6 h.
+
+<!-- designed-for:begin -->
+| Quantity | Assumption or target | Source |
+|---|---|---|
+| Peak request rate | ~900 requests/s | C2 |
+<!-- designed-for:end -->
+
+<!-- measured:begin -->
+| Metric | Value | Unit | Measured on | Run | Source key |
+|---|---|---|---|---|---|
+| Overhead requests | 10,234 | requests | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.overhead.requests` |
+| TTFB added p50 (k6 client-side) | 1.0 | ms | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p50` |
+| TTFB added p99 (k6 client-side) | 12.3 | ms | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p99` |
+| Processing overhead p99 (bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms) | 4.1 | ms | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.overhead.gateway_processing_overhead_ms.p99` |
+| Measured hit rate | 49.9 | % | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.cache_hit_rate.measured_hit_rate` |
+| Cost per 1,000 requests, baseline (modelled from list prices on a synthetic workload) | 0.1235 | USD | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.cost_per_1k.baseline_usd` |
+| Cost per 1,000 requests, both (modelled from list prices on a synthetic workload) | 0.0051 | USD | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.cost_per_1k.cache_and_routing_usd` |
+| Fallback killed at | 30.0 | s | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.fallback.primary_killed_at_s` |
+| Fallback success rate | 98.8 | % | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.fallback.success_rate_after_kill` |
+| Fallback added p95 (k6 client-side) | 450.6 | ms | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.fallback.added_latency_ms.p95` |
+| Admitted tokens per minute | 1000 | tokens/min | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.rate_limit.admitted_tokens_per_min` |
+| Open streams at N=1000: peak heap | 210.8 | MB | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.open_streams.runs[n=1000].peak_heap_used_mb` |
+| Open streams, first run: errors | 0 | errors | test data, not a measurement | 20261116T2130Z-test-data | `scenarios.open_streams.runs[0].errors` |
+| Cache-hit p99 (k6 client-side) | pending | ms | test data, not a measurement | | `scenarios.cache_hit_latency.p99_ms` |
+| Log insert p99 (bucket edges 0.5, 1, 2, 5 ms) | pending laptop run | ms | test data, not a measurement | | `scenarios.log_insert.p99_ms` |
+<!-- measured:end -->

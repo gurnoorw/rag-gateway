@@ -45,8 +45,8 @@ public class MetricsConfig {
             Duration.ofMillis(25), Duration.ofMillis(50), Duration.ofMillis(100), Duration.ofMillis(250),
             Duration.ofMillis(500), Duration.ofSeconds(1));
 
-    /** Same text as {@code RequestLogWriter}'s: Micrometer keeps the first description registered for a name. */
-    static final String REQUEST_LOG_WRITE_FAILURES_DESCRIPTION = "Request-log inserts that failed";
+    /** Used by {@code RequestLogWriter} too: Micrometer keeps the first description registered for a name. */
+    public static final String REQUEST_LOG_WRITE_FAILURES_DESCRIPTION = "Request-log inserts that failed";
 
     @Bean
     RequestMetricsListener requestMetricsListener(MeterRegistry registry, CostCalculator costs,

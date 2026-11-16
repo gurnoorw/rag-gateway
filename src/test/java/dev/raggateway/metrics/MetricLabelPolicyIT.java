@@ -181,6 +181,9 @@ class MetricLabelPolicyIT extends AbstractIntegrationTest {
         var policy = new MetricLabelPolicy(properties.models().keySet(), properties.providers().keySet(),
                 Set.of(paying, suspended), requestData);
         assertThat(policy.violations(scrape)).isEmpty();
+        // D-19/D-38: no latency histogram carries a tenant label, on the real scrape page.
+        assertThat(scrape.labelNames(n -> n.endsWith("_seconds_bucket") && n.startsWith("gateway_")))
+                .isNotEmpty().doesNotContain("tenant");
     }
 
     static Set<String> union(Set<String> a, Set<String> b) {

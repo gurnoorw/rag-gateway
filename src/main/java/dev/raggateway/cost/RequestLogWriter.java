@@ -5,6 +5,7 @@ import dev.raggateway.core.CacheStatus;
 import dev.raggateway.core.RequestContext;
 import dev.raggateway.core.Usage;
 import dev.raggateway.metrics.MetricNames;
+import dev.raggateway.metrics.MetricsConfig;
 import dev.raggateway.pipeline.RequestCompletionListener;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -68,7 +69,7 @@ public final class RequestLogWriter implements RequestCompletionListener {
                 .description("Request-log insert time")
                 .register(registry);
         this.writeFailures = Counter.builder(MetricNames.REQUEST_LOG_WRITE_FAILURES)
-                .description("Request-log inserts that failed")
+                .description(MetricsConfig.REQUEST_LOG_WRITE_FAILURES_DESCRIPTION)
                 .register(registry);
     }
 

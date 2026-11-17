@@ -24,8 +24,6 @@ import java.util.regex.Pattern;
  */
 public final class FakeEmbedder implements Embedder {
 
-    public static final String DOCUMENT_PREFIX = "search_document: ";
-    public static final String QUERY_PREFIX = "search_query: ";
     private static final Pattern NON_WORD = Pattern.compile("[^\\p{L}\\p{N}]+");
 
     private final int dimensions;

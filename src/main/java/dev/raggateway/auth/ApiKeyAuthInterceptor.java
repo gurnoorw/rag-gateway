@@ -45,8 +45,12 @@ public class ApiKeyAuthInterceptor implements HandlerInterceptor {
         return true;
     }
 
-    /** The token of a {@code Bearer} header (scheme case-insensitive), or null when absent or blank. */
-    static String bearerToken(String header) {
+    /**
+     * The token of a {@code Bearer} header (scheme case-insensitive), or null when absent or blank. Public so the
+     * document write filter, which must authenticate before the body is read, parses the header exactly as this
+     * interceptor does (a filter that read keys differently could let a key past its admission checks).
+     */
+    public static String bearerToken(String header) {
         if (header == null || header.length() <= BEARER.length()
                 || !header.regionMatches(true, 0, BEARER, 0, BEARER.length())) {
             return null;

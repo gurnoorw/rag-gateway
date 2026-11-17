@@ -41,8 +41,6 @@ import java.util.Objects;
  */
 public final class OllamaEmbedder implements Embedder, AutoCloseable {
 
-    public static final String DOCUMENT_PREFIX = "search_document: ";
-    public static final String QUERY_PREFIX = "search_query: ";
     /** Longest response read. 20 vectors of 768 values are about 0.3 MB of JSON. */
     static final int MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
     private static final int MAX_ERROR_MESSAGE = 200;

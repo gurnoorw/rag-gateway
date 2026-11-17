@@ -14,8 +14,6 @@ import dev.raggateway.rag.ingest.OllamaEmbedder;
 import dev.raggateway.rag.ingest.OutboxStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -73,12 +71,8 @@ public class RagConfig {
         return new JdbcChunkStore(jdbc, transactions);
     }
 
-    /**
-     * Conditional on the outbox and document stores, which are component-scanned beans of the write side
-     * (registered before any {@code @Bean} condition is evaluated, so the condition is reliable for them).
-     */
+    /** Needs the write side's stores; without them the app fails at startup rather than never indexing. */
     @Bean
-    @ConditionalOnBean({OutboxStore.class, DocumentStore.class})
     IndexingWorker indexingWorker(OutboxStore outbox, DocumentStore documents, ChunkStore chunks, Chunker chunker,
                                   Embedder embedder, RagProperties rag) {
         return new IndexingWorker(outbox, documents, chunks, chunker, embedder, rag.worker().claimBatch(),
@@ -91,22 +85,17 @@ public class RagConfig {
     @ConditionalOnProperty(prefix = "gateway.rag.worker", name = "enabled", havingValue = "true", matchIfMissing = true)
     static class WorkerScheduling implements SchedulingConfigurer {
 
-        private final ObjectProvider<IndexingWorker> worker;
+        private final IndexingWorker worker;
         private final RagProperties rag;
 
-        WorkerScheduling(ObjectProvider<IndexingWorker> worker, RagProperties rag) {
+        WorkerScheduling(IndexingWorker worker, RagProperties rag) {
             this.worker = worker;
             this.rag = rag;
         }
 
         @Override
         public void configureTasks(ScheduledTaskRegistrar registrar) {
-            IndexingWorker w = worker.getIfAvailable();
-            if (w == null) {
-                log.warn("indexing worker not scheduled: no OutboxStore/DocumentStore bean");
-                return;
-            }
-            registrar.addFixedDelayTask(w::scheduledPoll, rag.worker().pollDelay());
+            registrar.addFixedDelayTask(worker::scheduledPoll, rag.worker().pollDelay());
             log.info("indexing worker scheduled every {} after the previous poll", rag.worker().pollDelay());
         }
     }

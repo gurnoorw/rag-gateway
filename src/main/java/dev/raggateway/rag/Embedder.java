@@ -10,6 +10,14 @@ import java.util.List;
  */
 public interface Embedder {
 
+    /**
+     * {@code nomic-embed-text} task prefixes (D-47). Defined once here; only the model adapter adds them
+     * ({@code OllamaEmbedder}: documents in {@code embedDocuments}, questions in {@code embedQuery}); callers pass
+     * plain text.
+     */
+    String DOCUMENT_PREFIX = "search_document: ";
+    String QUERY_PREFIX = "search_query: ";
+
     int dimensions();
 
     /** One call for the whole batch (AC-t09-7). Result order matches input order. */

@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.raggateway.api.ErrorResponse;
 import dev.raggateway.api.GatewayHeaders;
 import dev.raggateway.api.RequestIdFilter;
+import dev.raggateway.auth.ApiKeyAuthInterceptor;
 import dev.raggateway.auth.ApiKeyAuthenticator;
 import dev.raggateway.core.ApiKeyPrincipal;
 import dev.raggateway.error.ErrorCode;
 import dev.raggateway.error.GatewayException;
+import dev.raggateway.rag.RagProperties;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ReadListener;
 import jakarta.servlet.ServletException;
@@ -16,13 +18,11 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.util.unit.DataSize;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.BufferedReader;
@@ -69,7 +69,6 @@ public class DocumentWriteFilter extends OncePerRequestFilter {
 
     /** The PUT path; ids are checked by the controller (400), here only the shape matters. */
     static final Pattern PATH = Pattern.compile("/v1/rag/collections/[^/]+/documents/[^/]+");
-    private static final String BEARER = "Bearer ";
 
     private final ApiKeyAuthenticator authenticator;
     private final ObjectMapper json;
@@ -78,14 +77,12 @@ public class DocumentWriteFilter extends OncePerRequestFilter {
     private final Semaphore writes;
 
     /**
-     * @param maxDocumentBytes    {@code gateway.rag.max-document-bytes}: request body limit (default 1 MB)
-     * @param maxConcurrentWrites {@code gateway.rag.max-concurrent-writes}: PUTs past this filter at once (default 4)
+     * Limits from {@link RagProperties} ({@code gateway.rag.max-document-bytes}, 1 MB, and
+     * {@code gateway.rag.max-concurrent-writes}, 4), so the defaults live in one place.
      */
     @Autowired
-    public DocumentWriteFilter(ApiKeyAuthenticator authenticator, ObjectMapper json,
-                               @Value("${gateway.rag.max-document-bytes:1MB}") DataSize maxDocumentBytes,
-                               @Value("${gateway.rag.max-concurrent-writes:4}") int maxConcurrentWrites) {
-        this(authenticator, json, maxDocumentBytes.toBytes(), maxConcurrentWrites);
+    public DocumentWriteFilter(ApiKeyAuthenticator authenticator, ObjectMapper json, RagProperties rag) {
+        this(authenticator, json, rag.maxDocumentBytes().toBytes(), rag.maxConcurrentWrites());
     }
 
     DocumentWriteFilter(ApiKeyAuthenticator authenticator, ObjectMapper json, long maxBytes, int maxConcurrentWrites) {
@@ -154,13 +151,8 @@ public class DocumentWriteFilter extends OncePerRequestFilter {
     }
 
     private Optional<ApiKeyPrincipal> caller(HttpServletRequest request) {
-        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
-        if (header == null || header.length() <= BEARER.length()
-                || !header.regionMatches(true, 0, BEARER, 0, BEARER.length())) {
-            return Optional.empty();
-        }
-        String key = header.substring(BEARER.length()).trim();
-        return key.isEmpty() ? Optional.empty() : authenticator.authenticate(key);
+        String key = ApiKeyAuthInterceptor.bearerToken(request.getHeader(HttpHeaders.AUTHORIZATION));
+        return key == null ? Optional.empty() : authenticator.authenticate(key);
     }
 
     /** The whole body if it has at most {@code max} bytes, else null after reading {@code max + 1}. */

@@ -23,14 +23,15 @@ import java.util.Optional;
  *   <li>embed {@code <title>\n\n<chunk text>} in batches of at most {@code embedBatchSize} chunks (default 20), one
  *       embedder call per batch. No transaction is open and no connection is held here: this class is not
  *       transactional, and every store call returns its connection before the next step (AC-t09-15);</li>
- *   <li>{@link ChunkStore#replaceForDocument}: one transaction that swaps the chunks and sets status and count;</li>
+ *   <li>{@link ChunkStore#replaceForDocument}: one transaction that swaps the chunks and sets status and count,
+ *       only if the document still holds the version read in step 1 (D-48);</li>
  *   <li>{@link OutboxStore#markDone}.</li>
  * </ol>
  * A job that fails at any step is released back to PENDING with the error (t09); t11 adds the attempt limit,
  * dead jobs and the stale-job skip. A document that no longer exists ends its job as done.
  *
- * <p>In the app one scheduled poller per instance calls {@link #pollOnce()} with a fixed delay, so polls never
- * overlap ({@code RagConfig}, off under the test profile). Tests call {@link #pollOnce()} directly.
+ * <p>In the app one scheduled poller per instance calls {@link #scheduledPoll()} with a fixed delay, so polls
+ * never overlap; it keeps polling without the delay while full batches succeed (D-48), and ({@code RagConfig}, off under the test profile). Tests call {@link #pollOnce()} directly.
  */
 public final class IndexingWorker {
 
@@ -65,27 +66,51 @@ public final class IndexingWorker {
      * @return the number of jobs claimed (handled or released)
      */
     public int pollOnce() {
-        List<OutboxEvent> jobs = outbox.claimBatch(claimBatch, lease);
-        for (OutboxEvent job : jobs) handle(job);
-        return jobs.size();
+        return poll().claimed();
     }
 
-    /** For the scheduler: a failed claim (database down) is logged, and the next poll tries again. */
-    public void scheduledPoll() {
+    /**
+     * For the scheduler: polls again at once while a poll claimed a full batch and every job in it succeeded, so a
+     * backlog (the corpus load, a t11 re-index) is not paced by the poll delay; the delay applies once the outbox
+     * is drained or a job failed, so a failing embedder is retried once per delay, not in a tight loop (D-48). Each
+     * round is a fresh claim with its own lease. A failed claim (database down) is logged, and the next poll tries
+     * again.
+     *
+     * @return the number of polls made
+     */
+    public int scheduledPoll() {
+        int polls = 0;
         try {
-            pollOnce();
+            Poll p;
+            do {
+                p = poll();
+                polls++;
+            } while (p.claimed() == claimBatch && p.succeeded() == p.claimed());
         } catch (RuntimeException e) {
             log.warn("indexing poll failed: {}", e.toString());
         }
+        return polls;
     }
 
-    private void handle(OutboxEvent job) {
+    private record Poll(int claimed, int succeeded) {
+    }
+
+    private Poll poll() {
+        List<OutboxEvent> jobs = outbox.claimBatch(claimBatch, lease);
+        int succeeded = 0;
+        for (OutboxEvent job : jobs) if (handle(job)) succeeded++;
+        return new Poll(jobs.size(), succeeded);
+    }
+
+    /** @return true when the job is done, false when it was released */
+    private boolean handle(OutboxEvent job) {
         long started = System.nanoTime();
         try {
             int count = index(job);
             outbox.markDone(job.id());
             log.info("indexed document {} into {} chunks in {} ms (job {}, attempt {})", job.documentId(), count,
                     (System.nanoTime() - started) / 1_000_000, job.id(), job.attempts());
+            return true;
         } catch (RuntimeException e) {
             String error = errorText(e);
             log.warn("indexing job {} for document {} failed (attempt {}): {}", job.id(), job.documentId(),
@@ -96,6 +121,7 @@ public final class IndexingWorker {
                 // The lease runs out and the job is claimed again; nothing more to do here.
                 log.warn("could not release indexing job {}: {}", job.id(), releaseFailure.toString());
             }
+            return false;
         }
     }
 
@@ -109,7 +135,12 @@ public final class IndexingWorker {
         IndexedDocument doc = found.get();
         List<ChunkText> pieces = chunker.split(doc.title(), doc.content());
         List<float[]> vectors = embed(doc.title(), pieces);
-        chunks.replaceForDocument(doc, pieces, vectors);
+        if (!chunks.replaceForDocument(doc, pieces, vectors)) {
+            // A newer PUT committed while this version was embedded; its own job indexes it (D-48).
+            log.info("document {} changed while job {} was indexing it; this version was not written",
+                    job.documentId(), job.id());
+            return 0;
+        }
         return pieces.size();
     }
 

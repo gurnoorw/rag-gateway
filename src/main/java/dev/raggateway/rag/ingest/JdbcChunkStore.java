@@ -18,7 +18,8 @@ import java.util.UUID;
  *   <li>{@link #replaceForDocument} is one transaction: delete the document's chunks, insert the new ones in JDBC
  *       batches of at most {@value #INSERT_BATCH_ROWS} rows, set the document's status to {@code indexed} and its
  *       chunk count. Readers see the old set or the new one; running it twice gives the same rows. A failure
- *       anywhere rolls all of it back.</li>
+ *       anywhere rolls all of it back. It first locks the document row and swaps only if the row still holds the
+ *       version that was embedded (D-48), so an old version can never overwrite a newer one.</li>
  *   <li>Vectors are bound as pgvector's text form ({@code [x,y,...]}) with {@code CAST(? AS vector)}: no extra
  *       driver dependency, and the column type still checks the length (768).</li>
  *   <li>Tenant, collection, doc id, title and ACL groups are copied from the document row the worker read (C16,
@@ -37,6 +38,7 @@ public final class JdbcChunkStore implements ChunkStore {
             INSERT INTO chunks (document_id, tenant_id, collection_id, doc_id, title, ordinal, text, embedding, acl_groups)
             VALUES (?, ?, ?, ?, ?, ?, ?, CAST(? AS vector), ?)
             """;
+    private static final String LOCK_VERSION = "SELECT content_hash FROM documents WHERE id = ? FOR UPDATE";
     private static final String MARK_INDEXED =
             "UPDATE documents SET status = 'indexed', chunk_count = ? WHERE id = ?";
 
@@ -49,7 +51,7 @@ public final class JdbcChunkStore implements ChunkStore {
     }
 
     @Override
-    public void replaceForDocument(IndexedDocument document, List<ChunkText> chunks, List<float[]> vectors) {
+    public boolean replaceForDocument(IndexedDocument document, List<ChunkText> chunks, List<float[]> vectors) {
         if (chunks.size() != vectors.size()) {
             throw new IllegalArgumentException(chunks.size() + " chunks but " + vectors.size() + " vectors");
         }
@@ -57,7 +59,9 @@ public final class JdbcChunkStore implements ChunkStore {
         for (int i = 0; i < chunks.size(); i++) rows.add(new Row(chunks.get(i), vectors.get(i)));
         String[] groups = new TreeSet<>(document.aclGroups()).toArray(String[]::new);
 
-        tx.executeWithoutResult(status -> {
+        Boolean swapped = tx.execute(status -> {
+            List<String> current = jdbc.queryForList(LOCK_VERSION, String.class, document.id());
+            if (current.isEmpty() || !current.getFirst().equals(document.contentHash())) return false;
             jdbc.update(DELETE, document.id());
             jdbc.batchUpdate(INSERT, rows, INSERT_BATCH_ROWS, (ps, row) -> {
                 Array acl = ps.getConnection().createArrayOf("text", groups);
@@ -71,9 +75,10 @@ public final class JdbcChunkStore implements ChunkStore {
                 ps.setString(8, vectorLiteral(row.vector()));
                 ps.setArray(9, acl);
             });
-            int updated = jdbc.update(MARK_INDEXED, rows.size(), document.id());
-            if (updated != 1) throw new IllegalStateException("document " + document.id() + " no longer exists");
+            jdbc.update(MARK_INDEXED, rows.size(), document.id());
+            return true;
         });
+        return Boolean.TRUE.equals(swapped);
     }
 
     @Override

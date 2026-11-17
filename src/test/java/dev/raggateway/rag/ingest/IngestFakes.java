@@ -159,10 +159,12 @@ final class IngestFakes {
         volatile Consumer<IndexedDocument> beforeReplace = d -> { };
 
         @Override
-        public void replaceForDocument(IndexedDocument d, List<ChunkText> chunks, List<float[]> vectors) {
+        public boolean replaceForDocument(IndexedDocument d, List<ChunkText> chunks, List<float[]> vectors) {
             events.add("replace " + d.id());
             beforeReplace.accept(d);
             if (chunks.size() != vectors.size()) throw new IllegalArgumentException("sizes differ");
+            IndexedDocument current = documents.rows.get(d.id());
+            if (current == null || !current.contentHash().equals(d.contentHash())) return false;
             List<ChunkRow> rows = new ArrayList<>();
             for (int i = 0; i < chunks.size(); i++) {
                 ChunkText c = chunks.get(i);
@@ -171,6 +173,7 @@ final class IngestFakes {
             }
             byDocument.put(d.id(), List.copyOf(rows));
             documents.rows.computeIfPresent(d.id(), (k, r) -> with(r, DocumentStatus.INDEXED, rows.size()));
+            return true;
         }
 
         @Override

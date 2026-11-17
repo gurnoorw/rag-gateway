@@ -162,6 +162,27 @@ class JdbcChunkStoreTest extends AbstractPostgresTest {
     }
 
     @Test
+    void anOldVersionNeverOverwritesANewerOne() {
+        store.replaceForDocument(doc, chunks(3), vectors(3));
+        // A newer PUT commits while the old version is still being embedded.
+        jdbc.sql("UPDATE documents SET content_hash = ?, status = 'queued' WHERE id = ?")
+                .params("1".repeat(64), doc.id()).update();
+
+        assertThat(store.replaceForDocument(doc, chunks(5), vectors(5))).isFalse();
+
+        assertThat(store.countForDocument(doc.id())).isEqualTo(3);
+        assertThat(jdbc.sql("SELECT status FROM documents WHERE id = ?").param(doc.id()).query(String.class).single())
+                .isEqualTo("queued");
+    }
+
+    @Test
+    void aDeletedDocumentIsNotAnError() {
+        jdbc.sql("DELETE FROM documents WHERE id = ?").param(doc.id()).update();
+        assertThat(store.replaceForDocument(doc, chunks(2), vectors(2))).isFalse();
+        assertThat(store.countForDocument(doc.id())).isZero();
+    }
+
+    @Test
     void vectorLiteralRejectsNonFiniteValues() {
         assertThat(JdbcChunkStore.vectorLiteral(new float[]{1f, -0.5f})).isEqualTo("[1.0,-0.5]");
         assertThatThrownBy(() -> JdbcChunkStore.vectorLiteral(new float[]{Float.NaN}))

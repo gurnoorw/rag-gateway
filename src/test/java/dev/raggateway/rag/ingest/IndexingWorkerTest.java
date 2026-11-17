@@ -160,6 +160,24 @@ class IndexingWorkerTest {
     }
 
     @Test
+    void aVersionSupersededDuringEmbeddingIsNotWrittenAndTheNewerOneIs() {
+        UUID id = fakes.put("t1", "docs", "d", "T", "Old text.", "eng");
+        fakes.chunks.beforeReplace = d -> {
+            fakes.chunks.beforeReplace = x -> { };
+            fakes.put("t1", "docs", "d", "T", "New text.", "eng");   // commits while "Old text." is embedded
+        };
+
+        worker.pollOnce();
+        assertThat(fakes.chunks.rows(id)).isEmpty();
+        assertThat(fakes.documents.get(id).status()).isEqualTo(DocumentStatus.QUEUED);
+
+        worker.pollOnce();
+        assertThat(fakes.chunks.rows(id)).extracting(ChunkRow::text).containsExactly("New text.");
+        assertThat(fakes.documents.get(id).status()).isEqualTo(DocumentStatus.INDEXED);
+        assertThat(fakes.outbox.jobs.values()).allSatisfy(j -> assertThat(j.status).isEqualTo(JobStatus.DONE));
+    }
+
+    @Test
     void anEmbedderThatReturnsTheWrongCountFailsTheJob() {
         UUID id = fakes.put("t1", "docs", "d", "T", "Text.", "eng");
         var broken = new IndexingWorker(fakes.outbox, fakes.documents, fakes.chunks, chunker, new Embedder() {
@@ -207,6 +225,26 @@ class IndexingWorkerTest {
 
         assertThat(fakes.chunks.rows(id)).hasSize(2);
         assertThat(fakes.documents.get(id).chunkCount()).isEqualTo(2);
+    }
+
+    @Test
+    void scheduledPollDrainsABacklogWithoutWaitingForTheDelay() {
+        for (int i = 0; i < 9; i++) fakes.put("t1", "docs", "d" + i, "T", "Text " + i + ".", "eng");
+
+        assertThat(worker.scheduledPoll()).isEqualTo(3);   // 4 + 4 + 1: stops at the first batch that is not full
+
+        assertThat(fakes.outbox.jobs.values()).hasSize(9)
+                .allSatisfy(j -> assertThat(j.status).isEqualTo(JobStatus.DONE));
+    }
+
+    @Test
+    void scheduledPollStopsAfterAFailedJobSoAFailingEmbedderIsNotRetriedInALoop() {
+        for (int i = 0; i < 8; i++) fakes.put("t1", "docs", "d" + i, "T", "Text " + i + ".", "eng");
+        embedder.failWhen = inputs -> true;
+
+        assertThat(worker.scheduledPoll()).isEqualTo(1);
+
+        assertThat(fakes.outbox.jobs.values()).filteredOn(j -> j.status == JobStatus.PENDING).hasSize(8);
     }
 
     @Test

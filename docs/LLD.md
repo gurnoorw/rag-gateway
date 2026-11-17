@@ -564,17 +564,21 @@ The hash covers the ACL groups too, so a permission change re-indexes the chunks
 **Claiming work safely across several workers.** Each worker takes a batch with a time-limited lease. `SKIP LOCKED` means two workers never grab the same row; the lease means a crashed worker's rows are picked up again later.
 
 ```sql
-UPDATE outbox SET status = 'IN_PROGRESS', lease_until = now() + interval '5 minutes',
-                  attempts = attempts + 1
-WHERE id IN (
+WITH picked AS MATERIALIZED (
   SELECT id FROM outbox
   WHERE status = 'PENDING' OR (status = 'IN_PROGRESS' AND lease_until < now())
   ORDER BY created_at
   LIMIT 20
   FOR UPDATE SKIP LOCKED
 )
-RETURNING id, doc_id, content_hash, attempts;
+UPDATE outbox o SET status = 'IN_PROGRESS', lease_until = now() + interval '5 minutes',
+                    attempts = o.attempts + 1
+  FROM picked
+ WHERE o.id = picked.id
+RETURNING o.id, o.document_id, o.content_hash, o.attempts;
 ```
+
+The pick runs in a materialised CTE so it executes exactly once. The tempting form `UPDATE … WHERE id IN (SELECT … LIMIT n FOR UPDATE SKIP LOCKED)` is wrong: if the planner chooses a nested-loop semi join, the sub-select is re-run per outer row, each run skips the rows already locked and returns the next ones, and one claim takes more than `n` jobs (see `docs/process/DECISIONS.md`, the D-47 amendment).
 
 **Processing.** Slow work (embedding calls) happens **outside** any database transaction; only the final swap of chunks is transactional.
 

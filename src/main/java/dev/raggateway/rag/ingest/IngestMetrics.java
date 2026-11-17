@@ -48,6 +48,9 @@ public class IngestMetrics {
                 .description("Dead indexing jobs with no newer job for their document (set by the worker after each poll)")
                 .strongReference(true)
                 .register(registry);
+        // Every result at zero from startup (D-38 pattern, t11 review D-52), so a rate or an alert on a result that
+        // has not happened yet reads 0 instead of "no data".
+        for (Result result : Result.values()) counter(result);
     }
 
     /** Metrics into a private registry nobody scrapes: for a worker built outside Spring (tests, tools). */
@@ -56,10 +59,14 @@ public class IngestMetrics {
     }
 
     public void count(Result result) {
-        counters.computeIfAbsent(result, r -> Counter.builder(MetricNames.INGEST_DOCUMENTS)
+        counter(result).increment();
+    }
+
+    private Counter counter(Result result) {
+        return counters.computeIfAbsent(result, r -> Counter.builder(MetricNames.INGEST_DOCUMENTS)
                 .description("Document PUT outcomes, indexing job outcomes and deletes")
                 .tag("result", r.label())
-                .register(registry)).increment();
+                .register(registry));
     }
 
     public void count(UpsertResult.Outcome outcome) {

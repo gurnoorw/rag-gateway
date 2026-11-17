@@ -1,5 +1,6 @@
 package dev.raggateway.rag;
 
+import dev.raggateway.rag.ingest.RetryPolicy;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.util.unit.DataSize;
@@ -89,19 +90,33 @@ public record RagProperties(
      * @param claimBatch most jobs claimed per poll (default 4), handled one at a time
      * @param lease     how long a claim is held before another worker may take it (default 5 min; covers the
      *                  whole batch even on a slow laptop)
+     * @param maxAttempts claims before a job is dead (default 5; t11, D-51)
+     * @param retryBase   wait after the first failed attempt, doubled after each further one (default 30 s)
+     * @param retryMax    longest wait between attempts (default 10 min)
      */
     public record Worker(@DefaultValue("true") boolean enabled,
                          @DefaultValue("1s") Duration pollDelay,
                          @DefaultValue("4") int claimBatch,
-                         @DefaultValue("5m") Duration lease) {
+                         @DefaultValue("5m") Duration lease,
+                         @DefaultValue("5") int maxAttempts,
+                         @DefaultValue("30s") Duration retryBase,
+                         @DefaultValue("10m") Duration retryMax) {
         public Worker {
             pollDelay = positive(pollDelay, Duration.ofSeconds(1), "worker.poll-delay");
             lease = positive(lease, Duration.ofMinutes(5), "worker.lease");
             require(claimBatch > 0, "worker.claim-batch must be > 0");
+            retryBase = retryBase == null ? Duration.ofSeconds(30) : retryBase;
+            retryMax = retryMax == null ? Duration.ofMinutes(10) : retryMax;
+            new RetryPolicy(maxAttempts, retryBase, retryMax);   // validates the three together
         }
 
         public static Worker defaults() {
-            return new Worker(true, null, 4, null);
+            return new Worker(true, null, 4, null, 5, null, null);
+        }
+
+        /** The worker's retry policy (D-51). */
+        public RetryPolicy retryPolicy() {
+            return new RetryPolicy(maxAttempts, retryBase, retryMax);
         }
     }
 

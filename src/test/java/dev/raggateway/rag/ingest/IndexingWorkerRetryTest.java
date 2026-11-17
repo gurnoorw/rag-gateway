@@ -26,10 +26,10 @@ class IndexingWorkerRetryTest {
     final CountingEmbedder embedder = fakes.new CountingEmbedder(new FakeEmbedder());
     final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     final IngestMetrics metrics = new IngestMetrics(registry);
-    final IndexingWorker worker = worker(WorkerRetryProperties.defaults());
+    final IndexingWorker worker = worker(RetryPolicy.defaults());
     final DocumentService service = new DocumentService(fakes.documents, fakes.outbox);
 
-    IndexingWorker worker(WorkerRetryProperties retry) {
+    IndexingWorker worker(RetryPolicy retry) {
         return new IndexingWorker(fakes.outbox, fakes.documents, fakes.chunks,
                 new HeadingParagraphSentenceChunker(new CharRatioTokenEstimator(), 400, 50, 400), embedder, 4,
                 Duration.ofMinutes(5), 20, retry, metrics);
@@ -49,9 +49,10 @@ class IndexingWorkerRetryTest {
     }
 
     @Test
-    void theGaugeIsRegisteredAtOnceAndACounterAtItsFirstEvent() {
+    void theGaugeAndEveryResultCounterAreRegisteredAtZero() {
         assertThat(deadGauge()).isZero();
-        assertThat(registry.find(MetricNames.INGEST_DOCUMENTS).counters()).isEmpty();
+        assertThat(registry.find(MetricNames.INGEST_DOCUMENTS).counters()).hasSize(IngestMetrics.Result.values().length)
+                .allSatisfy(c -> assertThat(c.count()).isZero());
         metrics.count(UpsertResult.Outcome.ACL_UPDATED);
         assertThat(count("acl_updated")).isEqualTo(1);
         assertThat(IngestMetrics.Result.values()).extracting(IngestMetrics.Result::label).containsExactly(
@@ -117,7 +118,7 @@ class IndexingWorkerRetryTest {
     @Test
     void aDeadJobLeavesADocumentThatANewerPutOwns() {
         UUID id = put("Old.");
-        var oneShot = worker(new WorkerRetryProperties(1, Duration.ofSeconds(30), Duration.ofMinutes(10)));
+        var oneShot = worker(new RetryPolicy(1, Duration.ofSeconds(30), Duration.ofMinutes(10)));
         embedder.failWhen = inputs -> true;
         embedder.duringCall = () -> fakes.documents.upsert(
                 new DocumentUpsert("t1", "docs", "d", "T", "New.", Set.of("eng")));   // a PUT lands mid-embed
@@ -132,7 +133,7 @@ class IndexingWorkerRetryTest {
     void maxAttemptsAndBackoffComeFromTheSettings() {
         UUID id = put("Fails.");
         embedder.failWhen = inputs -> true;
-        var two = worker(new WorkerRetryProperties(2, Duration.ofSeconds(1), Duration.ofSeconds(1)));
+        var two = worker(new RetryPolicy(2, Duration.ofSeconds(1), Duration.ofSeconds(1)));
 
         two.pollOnce();
         assertThat(fakes.outbox.retries).containsExactly(Duration.ofSeconds(1));

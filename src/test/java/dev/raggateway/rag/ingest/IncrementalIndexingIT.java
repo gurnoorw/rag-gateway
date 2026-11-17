@@ -80,7 +80,7 @@ class IncrementalIndexingIT extends AbstractIntegrationTest {
     @Autowired
     Retriever retriever;
     @Autowired
-    WorkerRetryProperties retrySettings;
+    dev.raggateway.rag.RagProperties rag;
     @Autowired
     IndexingWorker appWorker;
 
@@ -113,7 +113,7 @@ class IncrementalIndexingIT extends AbstractIntegrationTest {
             }
         };
         return new IndexingWorker(outbox, documents, counting, chunker, embedder, claimBatch, Duration.ofMinutes(5), 20,
-                retrySettings, metrics);
+                rag.worker().retryPolicy(), metrics);
     }
 
     /** Polls until a poll claims nothing. */
@@ -237,7 +237,7 @@ class IncrementalIndexingIT extends AbstractIntegrationTest {
 
     @Test
     void retrySettingsComeFromApplicationYmlAndTheAppWorkerRefreshesTheDeadGauge() throws Exception {
-        assertThat(retrySettings).isEqualTo(new WorkerRetryProperties(5, Duration.ofSeconds(30), Duration.ofMinutes(10)));
+        assertThat(rag.worker().retryPolicy()).isEqualTo(new RetryPolicy(5, Duration.ofSeconds(30), Duration.ofMinutes(10)));
         assertThat(putStatus("wired", "Wired", "Body.", "eng")).isEqualTo("queued");
         UUID job = (UUID) jobs(documentId("wired")).getFirst().get("id");
         jdbc.sql("UPDATE outbox SET status = 'DEAD' WHERE id = ?").param(job).update();

@@ -1,29 +1,21 @@
 package dev.raggateway.rag.ingest;
 
-import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import java.time.Duration;
 
 /**
- * Retry settings of the indexing worker ({@code gateway.rag.worker.max-attempts}, {@code retry-base},
- * {@code retry-max}; t11, D-51). Defaults live here; {@code application.yml} lists them.
- *
- * <p>They sit in their own record under the same prefix as {@code RagProperties.Worker} because
- * {@code RagProperties} is shared code outside t11's files this round; the reviewer may fold them into it later.
- * The other keys of {@code gateway.rag.worker} are ignored here, and these are ignored there.
+ * Retry policy of the indexing worker (t11, D-51): how often a failed job is claimed again and when it is dead. Built
+ * from {@code gateway.rag.worker.max-attempts}, {@code retry-base} and {@code retry-max} by
+ * {@code RagProperties.Worker#retryPolicy()} (folded into {@code RagProperties} in the t11 review, D-52).
  *
  * @param maxAttempts claims before a job is DEAD (default 5: with the defaults below, about 7.5 min of retries,
  *                    enough to ride out an Ollama restart)
  * @param retryBase   backoff after the first failed attempt (default 30 s), doubled after each further one
  * @param retryMax    longest backoff (default 10 min)
  */
-@ConfigurationProperties("gateway.rag.worker")
-public record WorkerRetryProperties(@DefaultValue("5") int maxAttempts,
-                                    @DefaultValue("30s") Duration retryBase,
-                                    @DefaultValue("10m") Duration retryMax) {
+public record RetryPolicy(int maxAttempts, Duration retryBase, Duration retryMax) {
 
-    public WorkerRetryProperties {
+    public RetryPolicy {
         retryBase = retryBase == null ? Duration.ofSeconds(30) : retryBase;
         retryMax = retryMax == null ? Duration.ofMinutes(10) : retryMax;
         if (maxAttempts < 1) throw new IllegalArgumentException("gateway.rag.worker.max-attempts must be >= 1");
@@ -35,8 +27,8 @@ public record WorkerRetryProperties(@DefaultValue("5") int maxAttempts,
         }
     }
 
-    public static WorkerRetryProperties defaults() {
-        return new WorkerRetryProperties(5, null, null);
+    public static RetryPolicy defaults() {
+        return new RetryPolicy(5, null, null);
     }
 
     /**

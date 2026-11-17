@@ -9,6 +9,7 @@ import dev.raggateway.rag.ingest.DocumentStore;
 import dev.raggateway.rag.ingest.FakeEmbedder;
 import dev.raggateway.rag.ingest.HeadingParagraphSentenceChunker;
 import dev.raggateway.rag.ingest.IndexingWorker;
+import dev.raggateway.rag.ingest.IngestMetrics;
 import dev.raggateway.rag.ingest.JdbcChunkStore;
 import dev.raggateway.rag.ingest.OllamaEmbedder;
 import dev.raggateway.rag.ingest.OutboxStore;
@@ -74,9 +75,9 @@ public class RagConfig {
     /** Needs the write side's stores; without them the app fails at startup rather than never indexing. */
     @Bean
     IndexingWorker indexingWorker(OutboxStore outbox, DocumentStore documents, ChunkStore chunks, Chunker chunker,
-                                  Embedder embedder, RagProperties rag) {
+                                  Embedder embedder, RagProperties rag, IngestMetrics metrics) {
         return new IndexingWorker(outbox, documents, chunks, chunker, embedder, rag.worker().claimBatch(),
-                rag.worker().lease(), rag.embedBatchSize());
+                rag.worker().lease(), rag.embedBatchSize(), rag.worker().retryPolicy(), metrics);
     }
 
     /** The poller. A fixed delay (not a rate) so a slow batch never overlaps the next poll. */

@@ -33,7 +33,7 @@ class RagConfigTest {
         assertThat(rag.embedTimeout()).isEqualTo(Duration.ofSeconds(60));
         assertThat(rag.maxDocumentBytes()).isEqualTo(DataSize.ofMegabytes(1));
         assertThat(rag.maxConcurrentWrites()).isEqualTo(4);
-        assertThat(rag.worker()).isEqualTo(new RagProperties.Worker(true, Duration.ofSeconds(1), 4, Duration.ofMinutes(5)));
+        assertThat(rag.worker()).isEqualTo(new RagProperties.Worker(true, Duration.ofSeconds(1), 4, Duration.ofMinutes(5), 5, Duration.ofSeconds(30), Duration.ofMinutes(10)));
         assertThat(rag.chunk()).isEqualTo(new RagProperties.Chunking(400, 50, 400));
     }
 

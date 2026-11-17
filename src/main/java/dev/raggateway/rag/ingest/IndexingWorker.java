@@ -6,7 +6,6 @@ import dev.raggateway.rag.Embedder;
 import dev.raggateway.rag.ingest.IngestMetrics.Result;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -59,19 +58,19 @@ public final class IndexingWorker {
     private final int claimBatch;
     private final Duration lease;
     private final int embedBatchSize;
-    private volatile WorkerRetryProperties retry;
-    private volatile IngestMetrics metrics;
+    private final RetryPolicy retry;
+    private final IngestMetrics metrics;
 
-    /** The t09 constructor ({@code RagConfig}): default retry settings and detached metrics until {@link #use}. */
+    /** For tests and tools: the default retry policy and metrics nobody scrapes. */
     public IndexingWorker(OutboxStore outbox, DocumentStore documents, ChunkStore chunks, Chunker chunker,
                           Embedder embedder, int claimBatch, Duration lease, int embedBatchSize) {
         this(outbox, documents, chunks, chunker, embedder, claimBatch, lease, embedBatchSize,
-                WorkerRetryProperties.defaults(), IngestMetrics.detached());
+                RetryPolicy.defaults(), IngestMetrics.detached());
     }
 
     public IndexingWorker(OutboxStore outbox, DocumentStore documents, ChunkStore chunks, Chunker chunker,
                           Embedder embedder, int claimBatch, Duration lease, int embedBatchSize,
-                          WorkerRetryProperties retry, IngestMetrics metrics) {
+                          RetryPolicy retry, IngestMetrics metrics) {
         this.outbox = Objects.requireNonNull(outbox, "outbox");
         this.documents = Objects.requireNonNull(documents, "documents");
         this.chunks = Objects.requireNonNull(chunks, "chunks");
@@ -81,16 +80,6 @@ public final class IndexingWorker {
         if (claimBatch <= 0 || embedBatchSize <= 0) throw new IllegalArgumentException("batch sizes must be > 0");
         this.claimBatch = claimBatch;
         this.embedBatchSize = embedBatchSize;
-        use(retry, metrics);
-    }
-
-    /**
-     * Spring injects the retry settings and the app's metrics here after {@code RagConfig} has built the worker with
-     * the t09 constructor ({@code RagConfig} is shared code this round, so its call is left as it is). Runs before
-     * the context is refreshed, so before the scheduler starts.
-     */
-    @Autowired
-    void use(WorkerRetryProperties retry, IngestMetrics metrics) {
         this.retry = Objects.requireNonNull(retry, "retry");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
     }
@@ -150,7 +139,7 @@ public final class IndexingWorker {
 
     /** @return true when the job is done (indexed or skipped), false when it was released or made dead */
     private boolean handle(OutboxEvent job) {
-        WorkerRetryProperties settings = retry;
+        RetryPolicy settings = retry;
         if (job.attempts() > settings.maxAttempts()) {
             // Earlier claims never reported back (crash, hang past the lease): do not process it yet again.
             fail(job, "no result after " + (job.attempts() - 1) + " claims (lease expired each time)", settings);
@@ -174,7 +163,7 @@ public final class IndexingWorker {
         }
     }
 
-    private void fail(OutboxEvent job, String error, WorkerRetryProperties settings) {
+    private void fail(OutboxEvent job, String error, RetryPolicy settings) {
         try {
             if (job.attempts() >= settings.maxAttempts()) {
                 OutboxStore.DeadLetter dead = outbox.markDead(job.id(), job.attempts(), error);

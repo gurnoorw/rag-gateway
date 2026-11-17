@@ -122,4 +122,13 @@ class EvalMainTest extends AbstractPostgresTest {
         assertThat(jdbc.sql("SELECT count(*) FROM documents WHERE tenant_id = ?").param(target)
                 .query(Integer.class).single()).isZero();
     }
+
+    @Test
+    void aFakeSmokeRunDefaultsToItsOwnTenantSoItCannotOverwriteRealVectors() {
+        var fake = EvalMain.Options.parse(new String[]{"--measured-on", "x", "--modes", "vector",
+                "--embedder", "fake", "--out", "build/eval/smoke.json"});
+        var keyword = EvalMain.Options.parse(new String[]{"--measured-on", "x"});
+        assertThat(fake.tenant()).isEqualTo("eval-fake");
+        assertThat(keyword.tenant()).isEqualTo("eval");
+    }
 }

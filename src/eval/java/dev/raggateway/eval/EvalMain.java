@@ -257,7 +257,9 @@ public final class EvalMain {
             return new Options(modes, sizes, embedder, measuredOn, outArg, aclMode,
                     Path.of(v.getOrDefault("--questions", QUESTIONS.toString())),
                     v.getOrDefault("--source-tenant", "acme"), v.getOrDefault("--source-collection", "k8s-docs"),
-                    v.getOrDefault("--tenant", "eval"),
+                    // A fake smoke run indexes into its own tenant, so it never re-embeds (and so destroys) an index
+                    // built with the real model; keyword and real-model runs share "eval" (t13 review, D-54).
+                    v.getOrDefault("--tenant", embedder == EvalResultsWriter.Embedder.FAKE ? "eval-fake" : "eval"),
                     v.getOrDefault("--jdbc-url", env("DB_URL", "jdbc:postgresql://localhost:5432/raggateway")),
                     v.getOrDefault("--ollama-url", env("GATEWAY_OLLAMA_BASE_URL", "http://localhost:11434")),
                     v.containsKey("--allow-dirty"));

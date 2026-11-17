@@ -26,7 +26,7 @@ On every chat request the gateway:
 | RAG ingestion (t09): document API, outbox, chunking, embeddings into pgvector | Built and tested; embeddings here come from a deterministic fake (Ollama is not reachable in the build environment), the Ollama adapter is tested against WireMock |
 | RAG query (t10): hybrid retrieval (Postgres full-text + pgvector, reciprocal rank fusion), answers with citations through the chat pipeline | Built and tested against WireMock providers and the fake embedder; no retrieval-quality numbers yet |
 | RAG hardening (t11–t12): incremental indexing (unchanged, groups-only and changed PUTs), retries with backoff and dead jobs, DELETE, chunk-level ACL leakage suite | Built and tested (fake embedder; leakage suite at 0 leaked chunks) |
-| RAG evaluation (t13): retrieval recall and answer scoring | Not built yet |
+| RAG evaluation (t13): retrieval recall@k / MRR / nDCG, ACL leak check, capped answer judge | Harness built and tested; keyword-only retrieval measured here (table below); vector, hybrid and answer scores pending the laptop run with `nomic-embed-text` and a real judge |
 
 ## Quickstart
 
@@ -286,25 +286,25 @@ Reproduce: load the corpus (`scripts/corpus/load_corpus.py`), then run `./gradle
 <!-- eval:begin -->
 | Metric | Value | Unit | Measured on | Embedder | Run | Source key |
 |---|---|---|---|---|---|---|
-| Recall@1, keyword, 200-token chunks | 0.179 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_1` |
-| Recall@5, keyword, 200-token chunks | 0.250 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_5` |
-| Recall@10, keyword, 200-token chunks | 0.321 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_10` |
-| MRR, keyword, 200-token chunks | 0.214 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].mrr` |
-| nDCG@10, keyword, 200-token chunks | 0.221 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].ndcg_at_10` |
-| Recall@1, keyword, 400-token chunks | 0.250 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_1` |
-| Recall@5, keyword, 400-token chunks | 0.429 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_5` |
-| Recall@10, keyword, 400-token chunks | 0.500 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_10` |
-| MRR, keyword, 400-token chunks | 0.328 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].mrr` |
-| nDCG@10, keyword, 400-token chunks | 0.369 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].ndcg_at_10` |
-| Recall@1, keyword, 800-token chunks | 0.179 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_1` |
-| Recall@5, keyword, 800-token chunks | 0.321 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_5` |
-| Recall@10, keyword, 800-token chunks | 0.429 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_10` |
-| MRR, keyword, 800-token chunks | 0.265 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].mrr` |
-| nDCG@10, keyword, 800-token chunks | 0.304 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].ndcg_at_10` |
-| ACL questions, keyword, 400-token chunks | 6 | questions | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.questions` |
-| ACL: chunks leaked to the unauthorised key (AclAudit), keyword, 400-token chunks | 0 | chunks | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.unauthorised_leaked_chunks` |
-| ACL: unauthorised key got no chunks (no-answer share), keyword, 400-token chunks | 0.000 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.unauthorised_no_answer_fraction` |
-| ACL: authorised key recall@5, keyword, 400-token chunks | 0.667 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.authorised_recall_at_5` |
+| Recall@1, keyword, 200-token chunks | 0.179 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_1` |
+| Recall@5, keyword, 200-token chunks | 0.286 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_5` |
+| Recall@10, keyword, 200-token chunks | 0.357 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_10` |
+| MRR, keyword, 200-token chunks | 0.227 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].mrr` |
+| nDCG@10, keyword, 200-token chunks | 0.237 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].ndcg_at_10` |
+| Recall@1, keyword, 400-token chunks | 0.250 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_1` |
+| Recall@5, keyword, 400-token chunks | 0.429 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_5` |
+| Recall@10, keyword, 400-token chunks | 0.536 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_10` |
+| MRR, keyword, 400-token chunks | 0.330 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].mrr` |
+| nDCG@10, keyword, 400-token chunks | 0.378 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].ndcg_at_10` |
+| Recall@1, keyword, 800-token chunks | 0.143 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_1` |
+| Recall@5, keyword, 800-token chunks | 0.393 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_5` |
+| Recall@10, keyword, 800-token chunks | 0.429 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_10` |
+| MRR, keyword, 800-token chunks | 0.252 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].mrr` |
+| nDCG@10, keyword, 800-token chunks | 0.295 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].ndcg_at_10` |
+| ACL questions, keyword, 400-token chunks | 6 | questions | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `acl.questions` |
+| ACL: chunks leaked to the unauthorised key (AclAudit), keyword, 400-token chunks | 0 | chunks | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `acl.unauthorised_leaked_chunks` |
+| ACL: unauthorised key got no chunks (no-answer share), keyword, 400-token chunks | 0.000 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `acl.unauthorised_no_answer_fraction` |
+| ACL: authorised key recall@5, keyword, 400-token chunks | 0.833 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0529Z-cloud-container-4-vcpu-15-gb | `acl.authorised_recall_at_5` |
 | Recall@5, vector, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=200].recall_at_5` |
 | MRR, vector, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=200].mrr` |
 | nDCG@10, vector, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=200].ndcg_at_10` |
@@ -362,6 +362,8 @@ Reproduce: load the corpus (`scripts/corpus/load_corpus.py`), then run `./gradle
 - **Key changes apply within 30 seconds (D-23, D-51).** Each instance caches a key's tenant, groups and admin flag for 30 s, so revoking a key or changing its groups takes up to that long to apply everywhere. A document's group change, by contrast, applies on the next query. The admin flag allows writing documents and reading their metadata; it gives no access to chunks beyond the key's own groups.
 - **Retrieval itself is not rate-limited (D-49).** The answer pays the tenant's token bucket and budget like a chat request, but the two searches and the embedding call before it are bounded only by the in-flight limit, and a question with no visible chunks costs nothing.
 - **The vector search is approximate (D-49).** When the HNSW index returns fewer candidates than asked (a selective group filter), the search re-runs exactly over the matching rows; that exact pass is cheap for small collections and is the signal to partition large ones.
+- **The retrieval eval is small and written by the builders (D-53, D-54).** 28 answerable questions, so one question moves recall by about 0.036 and a difference under about 0.1 between two settings is within noise. Questions and gold passages were written by the people who built the system; they are paraphrased on purpose, but they still reflect what the writers found easy to look up, and each names one gold document even where another page also answers. Treat the numbers as a regression baseline for this corpus, not as quality for real users.
+- **Answer scores will come from an LLM judge (D-53).** A small model grades each answer against the gold passage on a fixed rubric. It can favour long or confident answers and is not deterministic (no sampling controls on that model), so a judge score is published only with its agreement against 10 hand-labelled answers. Unanswerable questions are checked without the judge.
 - **The benchmark measures the gateway against mocks**, with load generator, mocks and gateway on one host (D-45). It says nothing about real provider latency or provider-side rate limits.
 
 ## How to reproduce

@@ -16,7 +16,10 @@ import java.util.UUID;
 /**
  * {@link OutboxStore} on the {@code outbox} table (V4, C4) with {@link JdbcClient}.
  *
- * <p>The claim is the LLD statement with the batch size and lease as parameters (D-47: 4 jobs, 5 minutes): one
+ * <p>The claim picks the rows in a {@code MATERIALIZED} CTE, so the locking sub-select runs exactly once (D-47
+ * amendment): written as {@code WHERE id IN (SELECT … LIMIT n FOR UPDATE SKIP LOCKED)}, a plan that re-scans the
+ * sub-select per outer row skips the rows the statement has just updated and returns new ones each time, so one
+ * claim could take every claimable row. Otherwise it is the LLD statement with the batch size and lease as parameters (D-47: 4 jobs, 5 minutes): one
  * {@code UPDATE} whose subquery picks claimable rows oldest first with {@code FOR UPDATE SKIP LOCKED}. A row
  * another claimer has locked is skipped rather than waited for, and a row another claimer has already committed as
  * IN_PROGRESS no longer matches the predicate when it is re-checked under the lock, so two claimers never get the
@@ -63,10 +66,7 @@ public class JdbcOutboxStore implements OutboxStore {
         record Claimed(OutboxEvent event, Instant createdAt) {
         }
         List<Claimed> claimed = jdbc.sql("""
-                        UPDATE outbox SET status = 'IN_PROGRESS',
-                                          lease_until = now() + :leaseMs * interval '1 millisecond',
-                                          attempts = attempts + 1
-                        WHERE id IN (
+                        WITH picked AS MATERIALIZED (
                           SELECT id FROM outbox
                           WHERE (status = 'PENDING' AND (lease_until IS NULL OR lease_until <= now()))
                              OR (status = 'IN_PROGRESS' AND lease_until < now())
@@ -74,7 +74,12 @@ public class JdbcOutboxStore implements OutboxStore {
                           LIMIT :max
                           FOR UPDATE SKIP LOCKED
                         )
-                        RETURNING id, document_id, content_hash, attempts, created_at
+                        UPDATE outbox o SET status = 'IN_PROGRESS',
+                                            lease_until = now() + :leaseMs * interval '1 millisecond',
+                                            attempts = o.attempts + 1
+                          FROM picked
+                         WHERE o.id = picked.id
+                        RETURNING o.id, o.document_id, o.content_hash, o.attempts, o.created_at
                         """)
                 .param("leaseMs", lease.toMillis())
                 .param("max", max)

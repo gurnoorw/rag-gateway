@@ -101,6 +101,43 @@ class JdbcOutboxStoreTest extends AbstractPostgresTest {
         assertThat(outbox.claimBatch(3, LEASE)).extracting(OutboxEvent::id).containsExactly(ids.get(3), ids.get(4));
     }
 
+    /**
+     * D-47 amendment: the claim takes at most {@code max} rows whatever plan Postgres picks. These session settings
+     * force the plan that re-scans the locking sub-select once per outer row (a nested-loop semi join with no hash,
+     * sort, materialise or memoise step), which is what the planner chose intermittently in the full build. With
+     * the old {@code WHERE id IN (SELECT … LIMIT n FOR UPDATE SKIP LOCKED)} form, each re-scan skipped the rows the
+     * statement had already updated and returned new ones, so one call claimed every claimable row (all 20 here).
+     * The materialised CTE runs the sub-select once.
+     */
+    @Test
+    void claimNeverTakesMoreThanMaxEvenOnAPlanThatRescansTheSubSelect() {
+        drain(100); // leftovers from other classes out of the way
+        List<UUID> ids = new ArrayList<>();
+        for (int i = 0; i < 20; i++) {
+            UUID id = job("r" + i);
+            jdbc.sql("UPDATE outbox SET created_at = now() - :s * interval '1 second' WHERE id = :id")
+                    .param("s", 100 - i).param("id", id).update();
+            ids.add(id);
+        }
+        jdbc.sql("ANALYZE outbox").update();
+        var pg = dev.raggateway.support.SharedContainers.postgres();
+        var rescanning = new org.postgresql.ds.PGSimpleDataSource();
+        rescanning.setUrl(pg.getJdbcUrl());
+        rescanning.setUser(pg.getUsername());
+        rescanning.setPassword(pg.getPassword());
+        rescanning.setOptions("-c enable_hashjoin=off -c enable_mergejoin=off -c enable_hashagg=off "
+                + "-c enable_sort=off -c enable_material=off -c enable_memoize=off");
+        var store = new JdbcOutboxStore(org.springframework.jdbc.core.simple.JdbcClient.create(rescanning),
+                new DataSourceTransactionManager(rescanning));
+
+        for (int batch = 0; batch < 7; batch++) {
+            List<OutboxEvent> got = store.claimBatch(3, LEASE);
+            assertThat(got).as("batch %d", batch).hasSizeLessThanOrEqualTo(3);
+            assertThat(got).extracting(OutboxEvent::id)
+                    .containsExactlyElementsOf(ids.subList(Math.min(20, batch * 3), Math.min(20, batch * 3 + 3)));
+        }
+    }
+
     @Test
     void anExpiredLeaseIsClaimableAgainWithTheAttemptCounted() {
         UUID a = job("a");

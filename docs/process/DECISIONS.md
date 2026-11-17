@@ -91,6 +91,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-52 | R10 review rulings (t11, t12) | retry settings folded into `RagProperties.Worker`; ingest counters at zero; V5 outbox indexes; cross-tenant DELETE stays 204; dead-job and fallback panels and alert rules |
 | D-53 | Eval method (t13 prep) | gold = doc id + verbatim passage; recall@k / MRR / nDCG@10 definitions; 3 modes × 3 chunk sizes; schema-checked results, fake embedder never committed; Haiku 5.5 judge from config, no sampling params, cap enforced per call, dry run; here vs laptop split |
 | D-54 | t13 review rulings | outbox claim via materialised CTE (D-47 amendment); keyword ties by doc id and ordinal; fake eval runs in their own tenant; keyword results re-run; misses checked by hand; README status and eval limits |
+| D-55 | Release preparation (t14 prep) | owner runbook; one release-check script; eval key seed script; pending cells block release unless allowlisted; wording patterns kept private; licence, tag and resume line are the owner's |
 
 ---
 
@@ -1081,4 +1082,37 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
 - **For the owner:**
   - The vector, hybrid and answer rows need the laptop run.
   - After loading with `nomic-embed-text`, run the matrix in tenant `eval`, not with `--embedder fake`.
+
+### D-55. Release preparation (t14 prep)
+- **Context:** the build environment has measured and checked everything it can (D-21). What remains needs the laptop, real models, an API key or the owner's judgement. The risk at release is a step done differently from how it was designed (a wrong label, a fake-embedder number, an uncalibrated judge score, a forgotten check), not missing code.
+- **Decision:**
+  - **`docs/RUNBOOK.md`:** the owner's steps 0–8 (prerequisites, stack and corpus with real embeddings, the live Claude check, laptop bench, real-embedding eval, answers with calibration, Grafana screenshot, README numbers, release checks and tag), each with its exact command and a checkable "done".
+  - **`scripts/seed-eval.sh`:** closes the t13 gap, the tenant `eval` key `answers collect` needs (groups eng, support, finance; non-admin; printed once; the previous one revoked).
+  - **`scripts/release_check.sh`:** one command running every release check, one OK/FAIL line each:
+    - fresh-clone build;
+    - README numbers in release mode;
+    - history secrets scan;
+    - decision index;
+    - Mermaid;
+    - `LICENSE`;
+    - version and changelog;
+    - wording.
+  - **Pending cells:** a "pending" cell blocks release unless `docs/process/release-pending-allowlist.txt` names it. The file is empty by default, so the owner chooses explicitly to ship without a laptop number.
+  - **Wording scan:** its term list lives in the gitignored `private/` directory, because a committed list of terms to avoid would itself put them in the public repository. Without the file the check is skipped with a notice.
+  - **Secrets scan:** the script assembles the provider key prefix from parts, so the scanner never matches itself.
+  - **Version:** `build.gradle.kts` stays `0.1.0-SNAPSHOT` until the owner's release commit sets `1.0.0`. The tag is `v1.0` (AC-t14-8), created and pushed only by the owner (C13).
+- **Owner decisions** (none are taken by agents):
+  1. **Licence.** The repository has none, so legally it is all-rights-reserved even though it is public.
+     - Recommendation: Apache-2.0, for its explicit patent grant and contribution terms; it is common for JVM infrastructure and compatible with every dependency in the build. MIT is the shorter alternative.
+     - The demo corpus is CC BY 4.0 and is fetched, not redistributed, so it doesn't constrain the choice.
+     - `release_check.sh` fails until a `LICENSE` file exists.
+  2. **Pending cells allowed at release** (default: none).
+  3. **Publishing answer scores.** Recommendation: only with calibration agreement of at least 8 of 10; otherwise the answer rows stay pending with the agreement stated.
+  4. **When to tag v1.0** (after acceptance of every task).
+  5. **How the project is described outside the repository**, in her own words, from measured laptop rows only.
+- **Rejected:**
+  - agents creating the tag or a licence;
+  - a committed list of terms to avoid;
+  - auto-filling README cells from results files (copying a value by hand and checking it keeps a human look at every number);
+  - a release CI workflow (the repository has no CI by design for this scope; the script runs anywhere).
 

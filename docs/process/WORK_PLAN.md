@@ -810,27 +810,88 @@ Merge A, then B. Run `./gradlew clean build`, then load the corpus (fake embedde
 
 ---
 
-## t14: Final README, tag v1.0, Gate 2 (Round R12)
+## t14: Final README, release checks, v1.0 (Round R12)
 
-**Design.** No new behaviour. The README covers both halves with both benchmark tables, trade-offs, limitations, next steps, and the corpus source and CC BY 4.0 attribution; every number maps to a committed result file. Release hygiene is scripted. No tag is created by agents. Decisions: C11, C13, C14, C27.
+**Design (D-55).**
+- No new behaviour. Every step only the owner can do (laptop bench, real-embedding eval, judge with calibration, Grafana screenshot, live Claude check, the tag) becomes one command with a checkable "done" in `docs/RUNBOOK.md`.
+- One script, `scripts/release_check.sh`, runs every release check.
+- The README covers both halves with both benchmark tables, the eval table, trade-offs, limitations, next steps, the runbook link and the corpus attribution. Every number maps to a committed results file.
+- No tag is created by agents.
+- Decisions: C11, C13, C14, C27, D-45, D-53, D-55.
 
-### Dev A: README and number checks
-- **Owns:** `README.md`, extends `scripts/check_readme_numbers.py` to the RAG table.
+**Round prep (reviewer, on `main`):**
+- `scripts/seed-eval.sh`: tenant `eval` and a non-admin key `eval:collect` with groups eng, support and finance, printed once, previous one revoked. Checked against a running app (200 on `/v1/usage`, earlier key revoked).
+- `docs/RUNBOOK.md`: the owner's steps 0–8 with exact commands.
+- Owner decisions listed in D-55.
+
+**Who runs what:**
+- **Owner only:**
+  - the laptop bench (`bench/run-all.sh --measured-on "8 GB MacBook Air"`);
+  - the `nomic-embed-text` retrieval matrix;
+  - the judge run with 10 calibration labels;
+  - the Grafana screenshot;
+  - the live Claude check;
+  - choosing the licence;
+  - the resume line in her own words;
+  - when to tag.
+- **Here:** everything that makes each of those one command and checkable, plus all static release checks.
+
+### Dev A: README, number checks, runbook
+- **Owns:**
+  - `README.md`;
+  - `scripts/check_readme_numbers.py` (adds `--release`) and its tests;
+  - `docs/process/release-pending-allowlist.txt` (empty by default: a pending cell is a release blocker unless the owner names it);
+  - `docs/RUNBOOK.md` (keeps commands in step with the scripts);
+  - `docs/img/` (the README image slot only; the owner adds the screenshot).
+- **Rules:**
+  - **README contents:**
+    - a "Next steps" section (design-level, from DECISIONS consequences);
+    - a "Release" link to the runbook;
+    - the Docs section linking `docs/process/DECISIONS.md`, `WORK_PLAN.md`, `TEAM_RULES.md` and `docs/RUNBOOK.md`;
+    - the Grafana image referenced as `docs/img/grafana-dashboard.png`, with alt text, rendered only once the file exists (the README says so until then).
+  - **`--release` mode:** it fails on any "pending" cell (bench or eval) whose metric isn't on the allowlist, and on a README image link whose file is missing.
 - **Acceptance criteria:**
-  - AC-t14-2: every number in the README maps to a committed result file (same script as AC-t08-2, extended to the RAG table).
-  - AC-t14-3: every benchmark row has a "Measured on" value; rows not yet run on the laptop say "pending laptop run" and carry no number.
-  - AC-t14-6: the README states the corpus source, commit SHA and CC BY 4.0 attribution; no corpus file is committed.
+  - AC-t14-2: every number in the README maps to a committed result file (bench and eval tables), checked by `check_readme_numbers.py`.
+  - AC-t14-3: every benchmark and eval row has a "Measured on" value; rows not yet run say "pending laptop run" and carry no number; `--release` fails while any remains outside the allowlist.
+  - AC-t14-6: the README states the corpus source, commit SHA and CC BY 4.0 attribution; no corpus file is committed (`git ls-files data/corpus` is empty).
+  - AC-t14-10: every relative link in `README.md` and `docs/RUNBOOK.md` resolves to a committed file (checked by the same script).
 
 ### Dev B: release hygiene
-- **Owns:** `CHANGELOG.md`, `docs/process/RELEASE_CHECKLIST.md`, `scripts/secrets_scan.sh`, `scripts/check_decisions.py`.
+- **Owns:**
+  - `CHANGELOG.md` (Keep a Changelog; one `1.0.0` entry, unreleased until the tag, listing t00–t14 by capability);
+  - `docs/process/RELEASE_CHECKLIST.md`;
+  - `scripts/release_check.sh`, `scripts/secrets_scan.sh`, `scripts/check_decisions.py`, `scripts/wording_scan.sh`;
+  - their tests in `scripts/tests/`.
+- **Rules:**
+  - **`release_check.sh [--version X]`** runs, in order:
+    - `./gradlew clean build` in a fresh clone of HEAD;
+    - `check_readme_numbers.py --release`;
+    - `secrets_scan.sh`;
+    - `check_decisions.py`;
+    - `check_mermaid.sh`;
+    - `LICENSE` present (fails with "owner decision, D-55" until she adds one);
+    - with `--version`: `CHANGELOG.md` has `## [X]` and `build.gradle.kts` has `version = "X"`;
+    - `wording_scan.sh`.
+    It prints one OK/FAIL line per check and exits non-zero on any FAIL.
+  - **`secrets_scan.sh`** scans every commit (`git rev-list --all`). It looks for the provider key prefix (assembled from parts in the script, so the script never contains the literal), any of the key variables in `.env.example` assigned a non-empty value, and a gateway key literal (`rgw_` + 43 base64url characters).
+  - **`wording_scan.sh`** reads its patterns from `private/wording-patterns.txt` (gitignored, owner-maintained). Without that file it prints "skipped: no private pattern file" and exits 0, so no term list is ever committed.
+  - **`check_decisions.py`** checks that C1–C27 each have a `### Cn.` entry and that every D-number in the index has a section and the other way round.
+  - Neither developer edits `build.gradle.kts`: the version bump is the owner's release commit.
 - **Acceptance criteria:**
-  - AC-t14-5: `docs/process/DECISIONS.md` has an entry for each of C1–C27 and each LLD deviation.
-  - AC-t14-7: a secrets scan of the full history finds nothing (same check as AC-t00-2: `git grep` over every commit for the provider key prefix and for the Anthropic key variable assigned a non-empty value).
+  - AC-t14-5: `check_decisions.py` passes: C1–C27 and every indexed D-entry have sections, and the LLD deviations (claim SQL, groups on keys, tenant columns, 768 dims) each name their entry.
+  - AC-t14-7: `secrets_scan.sh` over the full history finds nothing; a planted key in a temporary repository makes it fail (test).
+  - AC-t14-11: here, `release_check.sh` without `--version` passes every check except two: `LICENSE` (reported as the owner's decision) and `check_readme_numbers.py --release` (it lists the cells only the laptop run can fill).
+  - AC-t14-12: `wording_scan.sh` with a temporary pattern file finds a planted term and passes on a clean tree (test); without the file it skips.
 
 ### Integration step
-Merge A, then B. `./gradlew clean test` from a fresh clone (AC-t14-1: `./gradlew clean test` passes from a clean checkout); `bash scripts/secrets_scan.sh`; `python3 scripts/check_decisions.py`; `python3 scripts/check_readme_numbers.py`.
-- AC-t14-4: per-task notes for t00–t14 exist with their fixed sections. *(kept outside the repository; checked locally by the owner)*
-- **Owner only:** laptop benchmark and eval runs; acceptance for every task; AC-t14-8: `git tag -l v1.0` prints `v1.0` only after AC-t14-1..7 pass and acceptance for t01–t13 is complete; the remaining owner-only criterion (AC-t14-9) is tracked in the private notes.
+Merge A, then B. Run `bash scripts/release_check.sh`; expect OK for everything except `LICENSE` and the README release check, which lists the pending laptop cells. Then run `./gradlew clean build` twice.
+- AC-t14-1: `./gradlew clean test` passes from a clean checkout (inside `release_check.sh`).
+- AC-t14-4: per-task notes for t00–t14 exist with their fixed sections *(kept outside the repository; checked locally by the owner)*.
+- **Owner only:**
+  - `docs/RUNBOOK.md` steps 0–8;
+  - acceptance for every task;
+  - AC-t14-8: `git tag -l v1.0` prints `v1.0` only after AC-t14-1..7 and -10..12 pass and acceptance for t01–t13 is complete;
+  - AC-t14-9, tracked in the private notes.
 
 ---
 

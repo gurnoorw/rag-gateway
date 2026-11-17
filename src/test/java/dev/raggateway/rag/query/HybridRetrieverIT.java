@@ -9,6 +9,7 @@ import dev.raggateway.rag.Retriever;
 import dev.raggateway.support.AbstractIntegrationTest;
 import dev.raggateway.support.RagFixtures;
 import dev.raggateway.support.TestData;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -41,6 +42,12 @@ class HybridRetrieverIT extends AbstractIntegrationTest {
 
     @Autowired
     DataSource dataSource;
+
+    @AfterEach
+    void cleanUp() {
+        RagFixtures.deleteTenantDocuments(jdbc, TENANT);
+        jdbc.sql("DELETE FROM tenants WHERE id = ?").param(TENANT).update();
+    }
 
     @Test
     void concurrentHybridRetrievalsCompleteOnTheTestPoolOfThree() throws Exception {

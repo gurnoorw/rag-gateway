@@ -92,6 +92,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-53 | Eval method (t13 prep) | gold = doc id + verbatim passage; recall@k / MRR / nDCG@10 definitions; 3 modes × 3 chunk sizes; schema-checked results, fake embedder never committed; Haiku 5.5 judge from config, no sampling params, cap enforced per call, dry run; here vs laptop split |
 | D-54 | t13 review rulings | outbox claim via materialised CTE (D-47 amendment); keyword ties by doc id and ordinal; fake eval runs in their own tenant; keyword results re-run; misses checked by hand; README status and eval limits |
 | D-55 | Release preparation (t14 prep) | owner runbook; one release-check script; eval key seed script; pending cells block release unless allowlisted; wording patterns kept private; licence, tag and resume line are the owner's |
+| D-56 | t14 review and final pass | Dev A/B release-check choices accepted; a skipped wording scan fails the release; README and plan status corrected |
 
 ---
 
@@ -1115,4 +1116,25 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - a committed list of terms to avoid;
   - auto-filling README cells from results files (copying a value by hand and checking it keeps a human look at every number);
   - a release CI workflow (the repository has no CI by design for this scope; the script runs anywhere).
+
+### D-56. t14 review and final pass
+- **Dev A's choices: accepted.**
+  - **Link check in both modes:** dead relative links are a defect at any time, not only at release, and the check is cheap.
+  - **12 "laptop" rows in the measured table:** they are the headline metrics of the laptop run; they read "pending laptop run" with no number until a laptop summary file exists, and in `--release` mode they block the release unless allowlisted.
+  - **Allowlist by exact Metric text:** an allowlisted cell must be named exactly. A renamed row drops off the list and blocks again, which is the safe direction.
+  - **"Committed" means `git ls-files`:** a file that exists only in the working tree doesn't count for a link or a result.
+  - **A missing screenshot doesn't block the release:** the dashboard JSON is committed and checked (`check_dashboard.py`). The README links no image until `docs/img/grafana-dashboard.png` is committed, so no dead link is possible, and the screenshot stays a runbook step.
+- **Dev B's choices:**
+  - **`WORDING_PATTERNS_FILE` override:** accepted. Tests use it, and it never points at a committed list.
+  - **Passwords not scanned:** accepted. The only passwords in the repository are the documented local defaults of the compose stack. Real secrets live in `.env` (gitignored) and in the environment's key variables, which the scan covers (provider key prefix, `.env.example` key variables with values, gateway key literals).
+  - **SKIP counts as a failure:** accepted, and applied to the wording scan too. Before the review, `wording_scan.sh` printed "OK" when it had no pattern file, so a release check run without the owner's private file passed the wording check without checking anything. It now prints a SKIP line (standalone it still exits 0), and `release_check.sh` reports a check that exits 0 with a SKIP line as SKIP, which fails the release. New test: `test_a_wording_scan_without_its_pattern_file_is_a_skip_not_a_pass`.
+- **Whole-project pass:**
+  - **README, read top to bottom:**
+    - the S6b note no longer says the run "decides" the skip window (D-46 decided it after that run);
+    - the request path names the 30 s key cache (D-23);
+    - every number is either in a checked table, a configuration value stated as such (in-flight limit, backoff schedule, write cap) or a design assumption in the designed-for table;
+    - status rows, limitations and next steps match DECISIONS.
+  - **WORK_PLAN:** a status table records where every task stands and what remains for the owner.
+  - **Clean-up:** no TODO or FIXME markers in tracked files. The branch and worktree names in TEAM_RULES, WORK_PLAN and D-25 describe the process as it ran, so they stay.
+- **Release state here:** `release_check.sh --skip-build` reports FAIL only for `readme` (the laptop-pending cells) and `license` (D-55), plus the SKIP of the build it was told to skip. The full build and the static checks pass.
 

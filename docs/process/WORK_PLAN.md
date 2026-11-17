@@ -30,6 +30,19 @@ How the build is split between two developers (**Dev A**, **Dev B**) and a revie
 | R11 | t13 | Eval set, evidence check, retrieval metrics, report | Answer judge, spend cap, deterministic checks |
 | R12 | t14 | Final README and number checks | Changelog, release checklist, secrets scan, decision-log check |
 
+### Status at the end of the build (2026-11-17)
+
+Every task is merged on `main` with its tests green. "Owner" lists what remains for the owner (C13): her acceptance of every task, plus the steps in [`docs/RUNBOOK.md`](../RUNBOOK.md).
+
+| Task | State | Owner |
+|---|---|---|
+| t00 | done (setup) | AC-t00-3..5 |
+| t01–t07 | merged, tested | acceptance |
+| t08 | merged; container run committed | acceptance; laptop bench run (runbook step 3) |
+| t09–t12 | merged, tested with the fake embedder | acceptance; corpus loaded with `nomic-embed-text` (step 1) |
+| t13 | merged; keyword-only results committed | acceptance; vector, hybrid, ACL and judged answer runs (steps 4–5) |
+| t14 | merged; release checks pass except the licence and the laptop-pending README cells | licence choice, screenshot, README numbers, tag `v1.0` (steps 6–8) |
+
 Two-task rounds: **R6** (t06 touches only model selection; t07 touches only the terminal and request validation; the contracts `ModelSelector` and `Terminal` separate them) and **R10** (t11 touches only ingestion and the worker; t12 touches only retrieval SQL and tests; schema and the `Retriever` contract are already on `main`). One commit series per task; t06 merges before t07, t11 before t12.
 
 Private task notes drafted by: t01 A, t02 B, t03 A, t04 B, t05 A, t06 A, t07 B, t08 B, t09 A, t10 B, t11 A, t12 B, t13 A, t14 B.

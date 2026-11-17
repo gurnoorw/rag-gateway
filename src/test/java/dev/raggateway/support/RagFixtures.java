@@ -65,4 +65,51 @@ public final class RagFixtures {
     public static void deleteTenantDocuments(JdbcClient jdbc, String tenant) {
         jdbc.sql("DELETE FROM documents WHERE tenant_id = :tenant").param("tenant", tenant).update();
     }
+
+    /**
+     * A unit vector near {@code centre}: centre plus Gaussian noise of {@code spread} per dimension, normalised.
+     * For HNSW tests: the fake embedder's vectors are sparse, mostly orthogonal (exact distance ties) and collide, which
+     * builds a poorly connected graph (the t10 under-fill flake, D-49 amendment); dense clustered vectors behave like a
+     * real model's.
+     */
+    public static float[] near(float[] centre, double spread, long seed) {
+        var random = new java.util.SplittableRandom(seed);
+        float[] v = new float[centre.length];
+        double norm = 0;
+        for (int i = 0; i < v.length; i++) {
+            v[i] = (float) (centre[i] + spread * random.nextGaussian());
+            norm += (double) v[i] * v[i];
+        }
+        double scale = 1 / Math.sqrt(norm);
+        for (int i = 0; i < v.length; i++) v[i] = (float) (v[i] * scale);
+        return v;
+    }
+
+    /** A random dense unit vector (a cluster centre). */
+    public static float[] centre(long seed) {
+        return near(new float[768], 1, seed);
+    }
+
+    /**
+     * The D-49 HNSW shape in one collection: 1,500 chunks in group {@code eng} clustered near {@code question}'s
+     * centre, and 60 (~4%) in group {@code rare} clustered elsewhere. Texts are {@code noise <i>} and {@code rare <i>}.
+     *
+     * @return the question vector (near the noise cluster)
+     */
+    public static float[] hnswUnderFillShape(JdbcClient jdbc, String tenant, String collection, Embedder embedder) {
+        float[] noiseCentre = centre(1);
+        float[] rareCentre = centre(2);
+        UUID noise = document(jdbc, tenant, collection, "noise", "Noise", Set.of("eng"), embedder);
+        for (int i = 0; i < 1_500; i++) {
+            chunk(jdbc, noise, tenant, collection, "noise", "Noise", i, "noise " + i, new String[]{"eng"},
+                    near(noiseCentre, 0.03, 100 + i));
+        }
+        UUID rare = document(jdbc, tenant, collection, "rare", "Rare", Set.of("rare"), embedder);
+        for (int i = 0; i < 60; i++) {
+            chunk(jdbc, rare, tenant, collection, "rare", "Rare", i, "rare " + i, new String[]{"rare"},
+                    near(rareCentre, 0.03, 10_000 + i));
+        }
+        jdbc.sql("ANALYZE chunks").update();
+        return near(noiseCentre, 0.03, 99);
+    }
 }

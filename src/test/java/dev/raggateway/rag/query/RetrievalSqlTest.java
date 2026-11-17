@@ -136,25 +136,62 @@ class RetrievalSqlTest extends AbstractPostgresTest {
 
     @Test
     void vectorLegFillsTheCandidateListThroughTheIndexOnlyWithTheSessionSettings() {
-        // One collection of 1,560 chunks; only 60 (~4%) carry the caller's group. A selective tenant or collection
-        // filter can be planned as a btree scan plus an exact sort (no under-fill); a selective ACL filter cannot,
-        // so the planner walks the HNSW index and filters afterwards, which is where rows go missing.
-        UUID noise = RagFixtures.document(jdbc, tenant, "mixed", "noise", "Noise", Set.of("eng"), EMBEDDER);
-        for (int i = 0; i < 1_500; i++) {
-            RagFixtures.chunk(jdbc, noise, tenant, "mixed", "noise", "Noise", i, "noise " + i, new String[]{"eng"},
-                    EMBEDDER.embedDocuments(List.of("scheduling pods onto nodes, copy " + i)).getFirst());
-        }
-        UUID rare = RagFixtures.document(jdbc, tenant, "mixed", "rare", "Rare", Set.of("rare"), EMBEDDER);
-        for (int i = 0; i < 60; i++) {
-            RagFixtures.chunk(jdbc, rare, tenant, "mixed", "rare", "Rare", i, "rare " + i, new String[]{"rare"},
-                    EMBEDDER.embedDocuments(List.of("unrelated words number " + i)).getFirst());
-        }
-        jdbc.sql("ANALYZE chunks").update();
+        // One collection of 1,560 chunks; only 60 (~4%) carry the caller's group, clustered away from the question.
+        // Dense clustered vectors (not the fake embedder's sparse ones, which build a poorly connected graph: the
+        // under-fill flake, D-49 amendment). In the prep probe this shape filled 50 on 20 of 20 index rebuilds, also
+        // with 4,000 sparse rows of other tests in the shared index.
+        float[] question = RagFixtures.hnswUnderFillShape(jdbc, tenant, "mixed", EMBEDDER);
 
-        List<String> withSettings = vector(tenant, "mixed", "scheduling pods", 50, RagProperties.Retrieval.defaults(), "rare");
-        List<String> pgvectorDefaults = vector(tenant, "mixed", "scheduling pods", 50, null, "rare");
+        List<String> withSettings = vector(RetrievalSql.VECTOR, question, RagProperties.Retrieval.defaults());
+        List<String> pgvectorDefaults = vector(RetrievalSql.VECTOR, question, null);
 
         assertThat(withSettings).hasSize(50).allMatch(t -> t.startsWith("rare "));
         assertThat(pgvectorDefaults).hasSizeLessThan(50);   // ef_search 40 and no iterative scan: under-fill
+    }
+
+    @Test
+    void exactVectorLegReturnsEveryMatchingRowInDistanceOrderWithoutTheIndex() {
+        float[] question = RagFixtures.hnswUnderFillShape(jdbc, tenant, "mixed", EMBEDDER);
+        var noIterativeScan = new RagProperties.Retrieval(50, 60, 100, RagProperties.IterativeScan.OFF, 20_000);
+
+        List<String> exact = vector(RetrievalSql.VECTOR_EXACT, question, noIterativeScan);
+        List<String> truth = jdbc.sql("""
+                        SELECT text FROM chunks WHERE tenant_id = :t AND collection_id = 'mixed' AND acl_groups && '{rare}'
+                         ORDER BY embedding <=> CAST(:q AS vector), chunk_id LIMIT 50""")
+                .param("t", tenant).param("q", PgVector.literal(question)).query(String.class).list();
+
+        assertThat(exact).hasSize(50).containsExactlyElementsOf(truth);
+        assertThat(explain(RetrievalSql.VECTOR_EXACT, question)).doesNotContain("chunks_embedding_hnsw");
+    }
+
+    /** The vector statement on a session where HNSW is the only ordered plan (no sort, no sequential scan). */
+    List<String> vector(String sql, float[] question, RagProperties.Retrieval settings) {
+        return hnswOnly(settings, client -> client.sql(sql).param("tenant", tenant).param("collection", "mixed")
+                .param("groups", new String[]{"rare"}).param("limit", 50).param("vector", PgVector.literal(question))
+                .query((rs, n) -> rs.getString("text")).list());
+    }
+
+    String explain(String sql, float[] question) {
+        List<String> plan = hnswOnly(null, client -> client.sql("EXPLAIN " + sql).param("tenant", tenant)
+                .param("collection", "mixed").param("groups", new String[]{"rare"}).param("limit", 50)
+                .param("vector", PgVector.literal(question)).query(String.class).list());
+        return String.join("\n", plan);
+    }
+
+    <T> T hnswOnly(RagProperties.Retrieval settings,
+                   java.util.function.Function<org.springframework.jdbc.core.simple.JdbcClient, T> work) {
+        var tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        tx.setReadOnly(true);
+        return tx.execute(status -> {
+            var client = org.springframework.jdbc.core.simple.JdbcClient.create(
+                    new org.springframework.jdbc.datasource.SingleConnectionDataSource(
+                            org.springframework.jdbc.datasource.DataSourceUtils.getConnection(dataSource), true));
+            if (settings != null) RetrievalSql.vectorSessionSettings(settings).forEach(s -> client.sql(s).update());
+            // Force the HNSW index, as the planner picks it on a large table: on 1,560 rows it would rather read the
+            // few matching rows and sort them exactly. Without a sort node, the only ordered plan is the HNSW scan.
+            client.sql("SET LOCAL enable_seqscan = off").update();
+            client.sql("SET LOCAL enable_sort = off").update();
+            return work.apply(client);
+        });
     }
 }

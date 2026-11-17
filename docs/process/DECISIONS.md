@@ -90,6 +90,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-51 | Incremental indexing and ACL hardening (R10 prep) | three PUT outcomes under a row lock (unchanged, acl_updated, queued); fenced job updates; retry backoff and dead jobs; idempotent delete; leakage audited independently; key group changes within the 30 s cache TTL |
 | D-52 | R10 review rulings (t11, t12) | retry settings folded into `RagProperties.Worker`; ingest counters at zero; V5 outbox indexes; cross-tenant DELETE stays 204; dead-job and fallback panels and alert rules |
 | D-53 | Eval method (t13 prep) | gold = doc id + verbatim passage; recall@k / MRR / nDCG@10 definitions; 3 modes × 3 chunk sizes; schema-checked results, fake embedder never committed; Haiku 5.5 judge from config, no sampling params, cap enforced per call, dry run; here vs laptop split |
+| D-54 | t13 review rulings | outbox claim via materialised CTE (D-47 amendment); keyword ties by doc id and ordinal; fake eval runs in their own tenant; keyword results re-run; misses checked by hand; README status and eval limits |
 
 ---
 
@@ -747,6 +748,18 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - `pgvector-java` (text binding is enough).
   - Embedding chunks without the title.
 
+#### D-47 amendment: the outbox claim runs its locking sub-select once (t13 merge)
+- **Symptom:** `JdbcOutboxStoreTest` failed intermittently in the full build, with `claimBatch(3)` returning 4 ids. It wasn't leftover data.
+- **Cause:** the LLD's `UPDATE outbox … WHERE id IN (SELECT id … ORDER BY created_at LIMIT n FOR UPDATE SKIP LOCKED)`. When the planner chooses a nested-loop semi join with the sub-select as the inner side, it re-runs the sub-select once per outer row. Each re-run skips the rows the statement has already updated (`SKIP LOCKED` treats them as unavailable) and returns the next ones, so the UPDATE touches far more than `n` rows.
+  - Reproduced deterministically by forcing that plan in a session (no hash join, merge join, hash aggregate, sort, materialise or memoise). One `claimBatch(3)` claimed all 300 claimable rows. No concurrency is needed.
+  - With the default planner settings the plan was a hash semi join, which runs the sub-select once, which is why the failure was intermittent: it depended on table statistics.
+  - In production this would have broken the "≤ 4 jobs per poll" bound that D-47's heap and lease reasoning rests on, and the oldest-first order.
+- **Fix:** `WITH picked AS MATERIALIZED (SELECT id … LIMIT :max FOR UPDATE SKIP LOCKED) UPDATE outbox o SET … FROM picked WHERE o.id = picked.id RETURNING …`. A materialised CTE runs once whatever the plan.
+  - Fencing, attempts, lease and backoff semantics and the `outbox_claimable` index use are unchanged.
+  - The regression test forces the re-scanning plan and fails on the old SQL (20 of 20 claimed for a max of 3).
+  - Loop: `JdbcOutboxStoreTest` plus `IncrementalIndexingIT` passed 12 of 12 runs.
+- **This overrides the LLD's claim SQL** (the LLD stays as written; this entry wins, as for C1–C27).
+
 ### D-48. t09 review rulings
 - **Checked, and why each holds:**
   - **Two versions of a document are never visible at once.** `replaceForDocument` deletes and inserts in one transaction. Under read committed, a reader's statement sees the set before the commit or the set after it.
@@ -1031,4 +1044,41 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - temperature 0 for the judge (rejected by the model; agreement is measured instead);
   - `count_tokens` for the dry run (an API call; the local estimate is conservative);
   - a bigger judge model (cost and latency; the rubric is simple, and calibration shows whether it holds).
+
+### D-54. t13 review rulings
+- **Fixes found in the review:**
+  1. **Outbox over-claim:** see the D-47 amendment.
+  2. **Keyword ties.**
+     - `RetrievalSql.KEYWORD` broke equal `ts_rank_cd` scores by `chunk_id`, a random UUID that changes on every re-index.
+     - Ties are common (in one question the two best chunks scored 1.10 each), so results moved between index builds: the same code gave MRR 0.3275 or 0.329, and ACL authorised recall@5 0.667 or 0.833.
+     - Ties now go by `doc_id, ordinal`, which is unique within a tenant and collection and survives re-indexing. Two rebuilds from scratch now give identical per-question ranks.
+     - The committed keyword run was re-run on the fixed code (`20261117T0529Z-cloud-container-4-vcpu-15-gb`); the earlier file is removed, because it reflects the unstable order. The README rows are rewritten from the new file, and the check passes.
+  3. **Fake smoke runs.** A fake-embedder run re-embedded every document not built with the fake, so on the laptop it would overwrite the `nomic-embed-text` eval index. It now defaults to tenant `eval-fake`. Keyword and real-model runs share `eval`; keyword runs accept either embedder's index and never overwrite real vectors, and real-model runs re-embed anything not built with that model, so the version check covers the rest.
+- **a. Dev A's choices:**
+  - **Matching rule:** "60% of words in order" as the longest unbroken run of passage words is accepted. It's stricter than a scattered subsequence, and the review found no gold passage that fails to match its chunk (each matched exactly one chunk at 400).
+  - **No-answer share 0.000:** under OR semantics the support key matches some tutorial chunk for every ACL question. That's not a leak: 0 leaked chunks by `AclAudit`. The metric only becomes informative with an answering model (which should say "I don't know"); the README says so.
+  - **Answerable questions with every group:** accepted, since they measure retrieval quality, not ACLs.
+  - **ACL section in the same results file:** accepted.
+  - **Index reuse:** keyed by index version, and airtight for results with the tenant split above.
+  - **Fake runs:** not schema-checked but confined to `build/eval/`. Accepted: every non-fake write is schema-validated wherever it goes, and the schema rejects `fake`.
+  - **Source tenant defaults to `acme`:** accepted.
+- **b. Dev B's choices:**
+  - **Two-step collect then score:** accepted, because answers are collected once through the real endpoint and judged separately.
+  - **`EVAL_GATEWAY_API_KEY` for collect:** accepted. It is distinct from the judge's key.
+  - **ACL questions not judged:** accepted.
+  - **Refusal check accepting "I don't know …" with more text when nothing is cited:** accepted.
+  - **Verdict parsing:** the verdict is parsed from the raw text block and schema-checked, instead of via the SDK's typed accessor. Accepted, because the request still asks for structured output (asserted on the request body), the parse is validated, and malformed verdicts are rejected and reported.
+  - **`readItems` public:** accepted.
+  - **No real call without `--confirm-spend`:** checked. The client factory is reached only on that path, `--dry-run` and `--confirm-spend` are mutually exclusive, the key comes only from `EVAL_JUDGE_API_KEY`, and `--cap-usd` can only lower the file's cap.
+  - **Cap arithmetic:** `BigDecimal` cost, a worst-case check before each call and actual usage after it. The only estimate is the input token count at 3 characters per token, which over-counts English prose. Dense YAML could undercount, but at $0.10 per million input tokens a 10,000-token error is $0.001, so the cap holds to within a fraction of a cent per call.
+- **c. Keyword misses checked by hand** (7 of the 14 misses at 400), all genuine:
+  - paraphrase misses where the gold page scores low (q05 "confidential values … encrypted at rest", q08 "worker machine still alive" vs leases, q13, q15);
+  - a ranking miss caused by the missing IDF (q10: static pods score 2.0 under scheduler pages at 3.0);
+  - and two cases where the right document ranks first but through a different chunk from the one holding the answer (q04, q06).
+  - No gold-label or matcher errors: every gold passage matched exactly one chunk.
+  - Recall@5 0.429 at 400 is a plausible keyword baseline for deliberately paraphrased questions.
+- **d. README:** the t13 status row is updated. The limitations add the small, builder-written question set and the judge's bias with its calibration requirement.
+- **For the owner:**
+  - The vector, hybrid and answer rows need the laptop run.
+  - After loading with `nomic-embed-text`, run the matrix in tenant `eval`, not with `--embedder fake`.
 

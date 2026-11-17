@@ -84,6 +84,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-45 | Benchmark method (t08 prep) | k6 image, open vs closed load per scenario, TTFB as time to first token, summary file contract, mandatory hardware label, README numbers checked against files |
 | D-46 | t08 review: skip window, load shedding, rulings | Redis skip window shared by limiter/budget/cache; per-instance in-flight limit with 503 `overloaded`; heap per stream; schema gaps deferred |
 | D-47 | Ingestion details (t09 prep) | snake_case body, admin-only PUT and GET, write cap; bounded worker and embed batches; no connection held while embedding; Ollama `/api/embed` with task prefixes; word-hashing fake; pinned corpus |
+| D-48 | t09 review rulings | version-checked chunk swap; bounded heading carry; drain full batches; one prefix definition; worker bean unconditional; Dev A/B choices accepted |
 
 ---
 
@@ -740,4 +741,38 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - A per-tenant ingestion rate limit now (no need at demo scale; noted).
   - `pgvector-java` (text binding is enough).
   - Embedding chunks without the title.
+
+### D-48. t09 review rulings
+- **Checked, and why each holds:**
+  - **Two versions of a document are never visible at once.** `replaceForDocument` deletes and inserts in one transaction. Under read committed, a reader's statement sees the set before the commit or the set after it.
+  - **A stale version can't win (fixed here).** Before this review, the worker swapped in whatever version it had read. A job that was slow, or redone after its lease ran out, could finish after a newer PUT's job and write the old chunks over the new ones. It would also mark the document `indexed`, and the result was permanent. Now the swap transaction first locks the document row (`SELECT content_hash … FOR UPDATE`) and writes only if the row still holds the hash that was embedded; otherwise it writes nothing and returns false. The worker then ends that job: the newer PUT has its own job. A PUT that arrives during the swap waits on the row lock. Lock order is the same on both paths (document row, then child rows), so there is no deadlock. t11 still adds the skip before embedding, which saves the call.
+  - **Heap for a 1 MB document.**
+    - Chunking measured at 30–150 ms for 1 MB of prose, one 1 MB word, one sentence-less paragraph, 90,000 list lines and a 1 MB code block. Every chunk stays within the maximum.
+    - The chunk text is about 1.1 MB, the vectors about 3 MB, and one embed response about 0.3 MB; the vector literals are built one row at a time.
+    - One gap, fixed here: a run of bare headings was carried as one heading unit with no bound, and 1 MB of `# h` lines became one 333K-token chunk. With `truncate: false` that document could never be embedded.
+    - Now carried headings stay within a quarter of the maximum, a longer run becomes a chunk of its own, and a heading line longer than that is split like body text. Regression tests cover both cases and three 1 MB shapes.
+  - **SQL.** Every value in the four stores is a bound parameter (`:name` or `?`). The only concatenation is a constant column list. A probe of path forms (`;params`, `//`, `./`, a trailing slash, an encoded `;`) showed each one either goes through the write filter (413) or is a 404 that never reaches the controller, so the filter can't be bypassed into an unchecked write.
+  - **Prefixes.** They are now defined once, as `Embedder.DOCUMENT_PREFIX`/`QUERY_PREFIX`, and added in one place each: `OllamaEmbedder.embedDocuments` and `embedQuery`. The worker and the fake pass plain text; the fake strips a prefix if one is given.
+- **a. Dev A's choices: accepted.**
+  - The filter authenticates on its own, because it must decide before the body is read and filters run before the interceptor. It now uses the interceptor's `bearerToken`, so the two can't parse the header differently.
+  - A missing or unknown key goes on to the interceptor's 401. Unknown keys aren't cached (D-23), so such a request costs two lookups, on this path only.
+  - A chunked body is buffered up to limit + 1 bytes while holding a write slot. The worst case is 4 × 1 MB, inside the D-47 bound.
+  - The limits now come from `RagProperties` instead of separate `@Value` defaults, so the defaults live in one place.
+  - The admin check in the controller is kept as defence in depth.
+  - Re-sorting the claim by `created_at` is right: `RETURNING` has no order.
+  - Truncating `last_error` at 2,000 characters is right: the worker already cuts its message at 1,000, and the store guards every caller.
+- **b. Dev B's choices.**
+  - Overlap carries at least the previous chunk's last sentence, even above 50 tokens, while the result stays within the target: accepted. Cutting a sentence would break the no-mid-sentence rule, and dropping it would leave the continuation without context.
+  - Carrying a bare heading into the next section: accepted, with the bound above.
+  - `SchedulingConfigurer` for the poller: accepted. A fixed delay keeps polls from overlapping, and it is off under the test profile.
+  - The `@ConditionalOnBean` on the worker: removed. It was there only while Dev A's stores weren't on `main`; now a missing store should fail at startup, not quietly never index.
+  - `@DirtiesContext` on `IngestionE2EIT`: accepted. Its context is the only one with the poller on, and closing it after the class means no later test's jobs are taken.
+- **c. Throughput: the worker now drains a backlog.** 243 documents took 73.5 s because each poll handled 4 and then waited the 1 s delay; the fake embedder costs nothing. That pacing is wrong for the corpus load and for t11's re-index (AC-t11-4).
+  - `scheduledPoll` now polls again at once while a poll claimed a full batch and every job in it succeeded.
+  - The delay applies once the outbox is drained or a job failed, so an embedder that is down is retried once per delay, not in a tight loop.
+  - Each round is a fresh claim with its own lease, so the reason for claiming 4 (a lease that covers its batch) still holds.
+  - Tests: 9 queued jobs are drained in three polls with no delay; a failing embedder stops after one poll.
+  - Re-measured in the review (cloud container, 4 vCPU / 15 GB, fake embedder, not a model): `fetch_corpus.py` got 256/256 files with HTTP 200 (AC-t09-11), and `load_corpus.py --wait` reported all 243 documents indexed 11.9 s after the first PUT, against 73.5 s before. The result was the same 3,956 chunks, all 768 dimensions, with no chunk whose tenant or groups differ from its document's.
+- **d. Loader: accepted.** The 13 empty `_index.md` files are section pages with front matter only, so skipping them loses nothing. That's why 243 documents were indexed, not 256. Kubectl `{{ }}` go-templates are command text that users copy, so they stay, and only Hugo's `{{< >}}`/`{{% %}}` shortcodes are stripped.
+- **e. README "Demo corpus" section (Dev B, assigned): accepted.** It states the source, commit, authors, licence, the changes made and that nothing is committed, as CC BY 4.0 requires. The review added the t09 status row and two limitations: document writes are capped and admin-only but not rate-limited per tenant, and indexing is asynchronous and at-least-once with a version-checked swap.
 

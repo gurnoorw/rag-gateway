@@ -23,7 +23,8 @@ On every chat request the gateway:
 |---|---|
 | Gateway path (t01–t07): auth, rate limit, budget, cost log, fallback, metrics, cache, routing, output validation | Built and tested (JUnit 5 + Testcontainers, WireMock providers) |
 | Benchmarks (t08) | k6 harness against WireMock mocks; one committed run on a cloud container (see [Measured](#measured)); laptop run pending |
-| RAG path (t09–t13): ingestion, hybrid retrieval, ACL filtering, evals | Not built yet |
+| RAG ingestion (t09): document API, outbox, chunking, embeddings into pgvector | Built and tested; embeddings here come from a deterministic fake (Ollama is not reachable in the build environment), the Ollama adapter is tested against WireMock |
+| RAG path (t10–t13): hybrid retrieval, ACL filtering, evals | Not built yet |
 
 ## Quickstart
 
@@ -278,6 +279,8 @@ Notes on the rows:
 - **Schema requests are buffered (D-43).** A request with a `json_schema` response format gets no token streaming: its time to first byte is its full generation time, plus a second call when the first answer is invalid. A provider failure in the middle of a buffered call is not retried by the router; the client gets a 502.
 - **Concurrent streams per instance are bounded by heap, not by threads.** The "designed for" table's ~4K requests in flight is a design assumption for a fleet; one instance on a 512 MB heap does not hold it (see S7). The in-flight limit (D-46) makes the excess a fast, retryable 503 instead of an out-of-memory failure; capacity grows with heap and instances.
 - **Budget overshoot is bounded, not zero (C22).** The budget is checked before the call and charged after it, so a tenant can overshoot by its requests in flight × the cost of one request.
+- **Document writes are admin-only and capped per instance, not rate-limited per tenant (D-47).** At most 4 document PUTs per instance are past admission at once (503 `overloaded` above that), bodies are limited to 1 MB, and none of it is charged to a tenant's token bucket or budget.
+- **Indexing is asynchronous and at-least-once (C4, D-48).** A 202 means saved and queued, not searchable; `GET` on the document shows when it is `indexed`. A job can run twice (a crashed worker's lease runs out); the chunk swap is idempotent and only writes the version the document still holds, so a slow or repeated job never replaces newer chunks. Until t11, every PUT re-embeds the document, even when nothing changed.
 - **The benchmark measures the gateway against mocks**, with load generator, mocks and gateway on one host (D-45). It says nothing about real provider latency or provider-side rate limits.
 
 ## How to reproduce

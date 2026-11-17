@@ -85,7 +85,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-46 | t08 review: skip window, load shedding, rulings | Redis skip window shared by limiter/budget/cache; per-instance in-flight limit with 503 `overloaded`; heap per stream; schema gaps deferred |
 | D-47 | Ingestion details (t09 prep) | snake_case body, admin-only PUT and GET, write cap; bounded worker and embed batches; no connection held while embedding; Ollama `/api/embed` with task prefixes; word-hashing fake; pinned corpus |
 | D-48 | t09 review rulings | version-checked chunk swap; bounded heading carry; drain full batches; one prefix definition; worker bean unconditional; Dev A/B choices accepted |
-| D-49 | Retrieval and RAG answer details (t10 prep) | exact OR keyword SQL; ACL/tenant in both legs; `ef_search` 100 + strict iterative scan per query; RRF tie rule; S-labelled delimited prompt through the shared pipeline; no-sources answer without a call; keyword-only degradation |
+| D-49 | Retrieval and RAG answer details (t10 prep) | exact OR keyword SQL; ACL/tenant in both legs; `ef_search` 100 + strict iterative scan per query; RRF tie rule; S-labelled delimited prompt through the shared pipeline; no-sources answer without a call; keyword-only degradation; amended: exact re-run when the HNSW pass is short |
 
 ---
 
@@ -800,6 +800,7 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - `strict_order` over `relaxed_order`: RRF uses the vector ranks, so they must be in distance order. Relaxed would need a materialised CTE to re-sort.
   - Cost: a selective filter can make the scan visit up to `max_scan_tuples` index entries. That bounds the work and is the trade for full candidate lists.
   - pgvector's own note: a shared index across tenants lets one tenant's vectors affect another's recall and speed. Partitioning by tenant is the documented next step, not built.
+  - **Amended after the t10 merge (exact fallback).** The settings raise the odds of a full candidate list; they don't guarantee one. See "D-49 amendment" below.
 - **Both legs:** `tenant_id = :tenant AND collection_id = :collection AND acl_groups && CAST(:groups AS text[])` inside the statement (C16, C17).
   - An admin key retrieves with its own groups like any key; admin only governs writes.
   - Empty groups return nothing; t12 adds the short-circuit with no SQL.
@@ -845,4 +846,38 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - Calling the model with no sources.
   - A cross-encoder reranker: a model call per candidate, not in the stack; a non-goal, measured against in t13 only if recall needs it.
   - Streaming RAG answers: citations need the whole answer, and the endpoint returns JSON.
+
+#### D-49 amendment: HNSW under-fill and the exact fallback (t10 merge)
+- **Symptom:** `RetrievalSqlTest`'s HNSW fill test returned 48, 46 or 41 of 50 rows in some runs after Dev A's retriever tests joined the suite. Dev A's matching test had the same exposure.
+- **Diagnosis (pgvector 0.8.7 `hnswscan.c`, then a deterministic reproduction that rebuilt the index with `REINDEX` between runs):**
+  - The iterative scan stops for three reasons:
+    - `hnsw.max_scan_tuples` visited tuples;
+    - `work_mem × hnsw.scan_mem_multiplier` of scan memory;
+    - running out of discarded candidates, i.e. graph reachability.
+  - In `strict_order`, a tuple closer than the previous one returned is skipped.
+  - The flake was reachability. With the fake embedder's vectors:
+    - an unfiltered, unbounded iterative scan reached only 106–725 of the 1,560 index elements;
+    - the filtered count (33–42 of 60 after rebuilds) didn't change with `relaxed_order`, `max_scan_tuples` 200,000 or `scan_mem_multiplier` 8.
+  - Those vectors are degenerate for HNSW. The 60 "rare" vectors sat at exactly distance 1 from the question (feature hashing, no shared word), and only 936 of the 1,500 noise vectors were distinct. Graph construction is random, so each build connected a different part.
+  - With dense clustered vectors of the same shape, the scan filled 50 on 20 of 20 rebuilds, also with 4,000 sparse rows of other tests in the shared index. Without the iterative scan it returned 0 on 20 of 20.
+- **Production finding:** the tuple and memory stops do bind with real (dense) data. In one collection of 41,560 chunks where 60 (0.14%) match the caller's group:
+  - the default `max_scan_tuples` of 20,000 returned **1** row (about 70–90 ms);
+  - 100,000 tuples at the default memory multiplier returned **5** (`work_mem` 4 MB ran out first);
+  - 50,000 tuples with multiplier 16, or 100,000 with multiplier 4, returned **50** (about 340–400 ms);
+  - the planner, left alone, would read the 60 rows through the ACL index and sort them exactly in a few ms when its estimate is right.
+  - So a selective filter whose rows lie far from the question can under-fill silently. Raising the limits only moves the edge and makes every short scan slower.
+- **Decision: exact fallback.**
+  - `ChunkSearchRepository.vector` keeps the HNSW pass with the settings above. If the pass returns fewer than `limit` rows, the same read-only transaction re-runs the leg with `RetrievalSql.VECTOR_EXACT`: same predicates, ordered by `distance + 0` and then chunk id, which no index can serve.
+  - Postgres then reads the rows the filter matches and sorts them exactly. The leg always returns min(limit, matching rows) in exact order.
+  - The fallback runs exactly when a selective filter or a small collection caused the shortfall, which is when the exact read is cheap. Its cost is one sort over the matching rows; at a few thousand chunks per tenant and collection that is milliseconds.
+  - It is counted in `rag.retrieval.vector.exact_fallback`. A rising rate on a large collection is the signal to partition `chunks` by tenant or collection (pgvector's documented answer for multi-tenancy) rather than raise the scan limits.
+  - Rejected:
+    - raising `max_scan_tuples` and `scan_mem_multiplier` (slower scans for every short query, still no guarantee);
+    - partial indexes per group (groups are open-ended and per key);
+    - accepting the under-fill silently (RRF quietly loses the vector leg for restricted callers).
+- **Tests:**
+  - The HNSW tests use dense clustered vectors (`RagFixtures.hnswUnderFillShape`), so their graph is navigable like a real model's.
+  - `RetrievalSqlTest` keeps the SQL-level contrast: full with the settings, short with pgvector's defaults. It adds `VECTOR_EXACT` against a ground-truth query, and an `EXPLAIN` without the HNSW index.
+  - `ChunkSearchRepositoryTest` asserts the full list through the index, the counted fallback with exact order when the HNSW pass is forced short, and that a collection with fewer matching rows than the limit returns them all.
+  - Before this, its control assertion ("without the iterative scan the repository under-fills") tested the flaw, not the contract. It now asserts the fallback instead.
 

@@ -566,7 +566,7 @@ Merge A, then B. `./gradlew clean build`; `python3 scripts/corpus/fetch_corpus.p
 - `support/RagFixtures` inserts documents and chunks directly, with fake-embedder vectors computed the worker's way.
 
 ### Dev A: retrieval
-- **Owns:** `rag/query/ChunkSearchRepository.java` (the two `RetrievalSql` statements; vector leg in a read-only `TransactionTemplate` that runs `vectorSessionSettings` first), `rag/query/HybridRetriever.java` (implements `Retriever`), `rag/query/Rrf.java`, and tests (incl. `OllamaEmbedderQueryPrefixTest`).
+- **Owns:** `rag/query/ChunkSearchRepository.java` (the two `RetrievalSql` statements; vector leg in a read-only `TransactionTemplate` that runs `vectorSessionSettings` first, and re-runs exactly with `VECTOR_EXACT` when the HNSW pass is short: D-49 amendment), `rag/query/HybridRetriever.java` (implements `Retriever`), `rag/query/Rrf.java`, and tests (incl. `OllamaEmbedderQueryPrefixTest`).
 - **Codes against:** `Retriever` (returns `RetrievalResult`), `RetrievalQuery`, `RetrievedChunk`, `RetrievalMode`, `Embedder`, `RetrievalSql`, `RagProperties.Retrieval`, `PgVector`, `RagFixtures`, `MetricNames.RETRIEVAL_*`.
 - **Rules:**
   - The legs run on virtual threads. The keyword leg does not wait for the embedding.
@@ -655,7 +655,7 @@ Merge A, then B. Run `./gradlew clean build`. Then, with the corpus loaded (fake
   - AC-t12-2: for 10 questions whose only relevant documents are restricted, asked with a key lacking the group → 0 restricted chunk ids in retrieval, 0 restricted text in the upstream prompt (WireMock capture), 0 restricted citations.
   - AC-t12-3: tenant B with a group of the same name as tenant A's gets 0 of tenant A's chunks.
   - AC-t12-4: a key with an empty group set → the "no answer" response, 0 provider calls.
-  - AC-t12-5: under-fill test: with the HNSW index forced (`enable_seqscan = off`) and a filter matching < 5% of ≥ 5,000 chunks, the vector leg returns the full requested candidate count with iterative scan on; the same query with it off returns fewer. The test records both counts.
+  - AC-t12-5: under-fill test: with the HNSW index forced (no sort, no sequential scan) and a filter matching < 5% of ≥ 5,000 chunks as dense clustered vectors (`RagFixtures.near`), the `VECTOR` statement returns the full candidate count with iterative scan on and fewer with it off (both counts recorded); through the repository the result is full either way and the off case increments `rag.retrieval.vector.exact_fallback` (D-49 amendment).
   - AC-t12-6: `EXPLAIN` of both legs shows the ACL predicate inside the scan, and the test asserts the repository returns no row that was later dropped in Java (no post-filter code path exists).
   - AC-t12-7: after a PUT that removes a group from a document and the worker run, a key with only that group no longer retrieves it.
   - AC-t12-8: key A (group `security`) and key B (group `eng`) ask the same question; B's response contains no text from security-only chunks, including when A asked first (cache test).

@@ -691,6 +691,106 @@
           "range": true
         }
       ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Indexing: dead jobs and outcomes",
+      "description": "Unresolved dead indexing jobs (gauge; above 0 means documents that will not become searchable without a re-PUT, D-51) and document outcomes per second.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max(rag_outbox_dead)",
+          "legendFormat": "dead jobs",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (result) (rate(rag_ingest_documents_total[$__rate_interval]))",
+          "legendFormat": "{{result}} /s",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Vector search exact fallbacks",
+      "description": "Vector legs whose HNSW pass came back short and were re-run exactly, per second (D-49 amendment). A rising share on a large collection is the signal to partition chunks by tenant.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(rag_retrieval_vector_exact_fallback_total[$__rate_interval]))",
+          "legendFormat": "exact fallbacks",
+          "range": true
+        }
+      ]
     }
   ],
   "version": 1

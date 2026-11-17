@@ -1,0 +1,19 @@
+# Alert rules for the obs profile (t11/t12 review, D-52). Prometheus evaluates them and shows firing alerts on its
+# Alerts page; no Alertmanager is configured (nothing is sent anywhere).
+groups:
+  - name: rag-gateway
+    rules:
+      - alert: RagDeadIndexingJobs
+        expr: max(rag_outbox_dead) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexing jobs are dead: documents will not become searchable until re-PUT (D-51)"
+      - alert: RagVectorExactFallbackRising
+        expr: sum(rate(rag_retrieval_vector_exact_fallback_total[15m])) > 0.5
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Vector searches often fall back to an exact scan: consider partitioning chunks (D-49 amendment)"

@@ -29,6 +29,10 @@ import java.util.Set;
  *       leak to the next borrower of the connection), then the distance-ordered statement. The caller embeds the
  *       question before calling, so no connection is held while the embedder works.</li>
  * </ul>
+ * Empty groups return an empty list from either leg without touching the database (t12, AC-t12-4): an empty
+ * {@code text[]} overlaps nothing, so the statement could only return nothing, and in the vector leg the empty HNSW
+ * pass would also trigger (and count) a pointless exact re-run. {@link HybridRetriever} short-circuits first; this
+ * guard keeps the rule for any other caller of the repository (the t13 evaluation).
  * A database failure propagates as Spring's {@code DataAccessException}; the retriever treats it as an error in
  * every mode. Thread-safe.
  */
@@ -66,6 +70,7 @@ public class ChunkSearchRepository {
 
     /** Keyword leg: Postgres full-text ranking (C18), OR between terms (C19), best first. */
     public List<Row> keyword(String tenant, String collection, Set<String> groups, String question, int limit) {
+        if (groups.isEmpty()) return List.of();
         return jdbc.sql(RetrievalSql.KEYWORD)
                 .param("tenant", tenant).param("collection", collection).param("groups", array(groups))
                 .param("question", question).param("limit", limit)
@@ -80,6 +85,7 @@ public class ChunkSearchRepository {
      * {@code rag.retrieval.vector.exact_fallback}.
      */
     public List<Row> vector(String tenant, String collection, Set<String> groups, float[] vector, int limit) {
+        if (groups.isEmpty()) return List.of();
         String literal = PgVector.literal(vector);
         String[] acl = array(groups);
         return readOnly.execute(status -> {

@@ -293,6 +293,10 @@ python3 -m unittest discover -s scripts/tests -v                        # tests 
 
 `--measured-on` is required and has no default, so a run cannot be mislabelled. Raw k6 output stays in the gitignored `bench/results/`; the summary file is committed. The observability stack (`docker compose --profile obs up -d`) adds Prometheus and Grafana with the dashboard in `ops/grafana/dashboards/`.
 
+## Demo corpus
+
+The RAG demo indexes documentation from [kubernetes/website](https://github.com/kubernetes/website) at commit `adaa04d017c75981660828f869b364a266b0ef53` (the concepts, tutorials and setup pages), by The Kubernetes Authors, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The material is modified: Hugo front matter, shortcode tags and HTML comments are stripped, and each page is split into chunks and embedded for search. Nothing of it is committed: `scripts/corpus/fetch_corpus.py` downloads it into the gitignored `data/corpus/`. Source, licence and changes: [data/CORPUS_ATTRIBUTION.md](data/CORPUS_ATTRIBUTION.md).
+
 ## Docs
 
 - [Roadmap](docs/ROADMAP.md): scope, task plan, stack, hardware constraints

@@ -710,31 +710,103 @@ Merge t11, then t12 (B rebases on `main` with t11). `./gradlew clean build`. Rec
 
 ## t13: Eval set, recall@k, answer scoring (Round R11)
 
-**Design.** A versioned eval file over the pinned corpus; gold evidence is a document id plus a short passage that must appear verbatim in that document, so labels do not depend on chunk size (matching rule: a retrieved chunk is relevant if it belongs to the gold document and contains at least 60 % of the evidence passage's words in order, or the whole passage). One command indexes the corpus at 200, 400 and 800 target tokens into separate collections and reports recall@1/5/10 and MRR for keyword, vector and hybrid. An answer judge (`claude-haiku-5-5`, own SDK client, D-24) scores answers on a fixed rubric under a spend cap. Deterministic checks need no judge. Decisions: C14, C18, D-18, D-21, D-24.
+**Design (D-53).**
+- **Eval set:** a versioned file over the pinned corpus (`kubernetes/website` at `adaa04d0…`).
+  - Gold evidence is a document id plus a short passage copied verbatim from that document's cleaned text, so labels don't depend on chunk size.
+  - Matching rule: a retrieved chunk is relevant if it belongs to the gold document and contains the whole passage, or at least 60% of its words in order.
+- **Retrieval eval:** runs in-process against Postgres. It reads the cleaned documents of a loaded `k8s-docs` collection, re-chunks them at 200, 400 and 800 target tokens into separate collections, and reports recall@1/5/10, MRR and nDCG@10 for keyword, vector and hybrid.
+- **ACL eval:** asks each `acl` question twice and counts leaks with `AclAudit`.
+- **Answer eval:** an LLM judge (`eval/judge/judge.properties`: `claude-haiku-5-5`, own SDK client, D-24) scores answers on a fixed rubric under a spend cap enforced in code. Deterministic checks need no judge.
+- **Results:** one schema-checked file per run under `eval/results/`, committed, labelled with hardware and embedder. The fake embedder never writes there.
+- Decisions: C14, C18, D-18, D-21, D-24, D-51, D-53.
 
-**Round prep:** none. Dev A owns `build.gradle.kts` this round (lets the `test` source set see `eval` classes).
+**Round prep (reviewer, on `main`):**
+- `eval/results.schema.json` (results contract; the fake embedder is rejected; keyword-only runs are `embedder.kind: none`).
+- `eval/questions.schema.json` (one question per line; gold required by kind).
+- `eval/judge/judge.properties`: model id and list price looked up in the claude-api reference, effort, max tokens, cap, key variable name.
+- `EvalSchemasTest`.
 
-### Dev A: eval set and retrieval metrics
-- **Owns:** `eval/questions.v1.jsonl` (~15 conceptual, ~8 exact-term, 5 unanswerable, 10 ACL questions reused by t12), `eval/README.md` (how labels were made), `src/eval/java/dev/raggateway/eval/{EvalMain, EvalSet, EvidenceMatcher, CorpusEvidenceChecker, RetrievalMetrics, RetrievalEvalRunner, EvalReportWriter}.java`, `eval/reports/` (committed reports), `build.gradle.kts`, and tests.
+**The matrix and who runs it:**
+
+| Part | Modes × chunk sizes | Here (cloud container) | Owner's laptop |
+|---|---|---|---|
+| Retrieval | keyword × 200/400/800 | real run, committed (`embedder.kind: none`) | re-run on the laptop, committed |
+| Retrieval | vector, hybrid × 200/400/800 | smoke run with the fake embedder into `build/eval/` only, never committed or quoted | real `nomic-embed-text`, committed |
+| ACL | hybrid at 400 (keyword at 400 here) | keyword run: leaked chunks and unauthorised no-answer | hybrid run |
+| Answers | hybrid at 400, top_k 5, through `POST /v1/rag/query` | judge tested against WireMock only; `--dry-run` cost estimate | real judge with the owner's key and cap; generator via the gateway (Claude, or `llama3.2:1b` fallback) |
+
+### Dev A: eval set, retrieval and ACL metrics
+- **Owns:**
+  - `eval/questions.v1.jsonl`, `eval/README.md` (how labels were made, their biases);
+  - `src/eval/java/dev/raggateway/eval/{EvalMain, EvalSet, EvidenceMatcher, RetrievalMetrics, RetrievalEvalRunner, AclEvalRunner, EvalIndexer, EvalResultsWriter}.java`;
+  - `scripts/eval/check_evidence.py` (std lib; uses `load_corpus.document()` so cleaning has one implementation);
+  - `scripts/check_readme_numbers.py` (adds the eval table) with its tests;
+  - `build.gradle.kts` (test source set sees eval classes; eval tests run in `./gradlew test`);
+  - `eval/results/` (committed keyword-only run);
+  - the README's eval table, with keyword rows from the committed run and every vector, hybrid and answer cell set to "pending laptop run";
+  - tests.
+- **Codes against:**
+  - `eval/questions.schema.json`, `eval/results.schema.json`;
+  - `HybridRetriever`/`ChunkSearchRepository` and `HeadingParagraphSentenceChunker` used in-process;
+  - `FakeEmbedder` for the vector column during keyword-only indexing (its vectors are never compared);
+  - `AclAudit`; `DocumentHash`.
+- **Rules:**
+  - **Questions:** ≥ 30 in all, at least 15 conceptual, 8 exact-term (flag and field names), 5 unanswerable (things the Kubernetes docs don't cover), and 6 `acl`.
+    - The `acl` questions' gold documents are in `setup` (group `finance`) or `concepts` (group `eng`), so the support key (`support` only) is the unauthorised asker.
+    - Evidence is 20–400 characters, copied from the cleaned text.
+    - Write the question in words that differ from the evidence where possible (paraphrase), so keyword search isn't flattered.
+  - **Indexing:** the eval indexes into tenant `eval`, collections `k8s-c200`, `k8s-c400`, `k8s-c800`, with overlap 25/50/100 and max equal to the target. It reads cleaned content from the `documents` table of the loaded `k8s-docs` collection; it does not re-clean files.
+  - **Metrics:** recall@k is the fraction of answerable questions with at least one relevant chunk in the top k. MRR is the mean of 1/rank of the first relevant chunk (0 if none in the top 10). nDCG@10 uses binary relevance, with ideal DCG over min(relevant chunks, 10). Unanswerable and `acl` questions are excluded from these and scored separately.
+  - **Output and flags:**
+    - `./gradlew eval --args="retrieval --modes keyword --measured-on '…'"` writes `eval/results/<run_id>.json` (schema-checked before writing).
+    - `--embedder fake` is accepted only with `--out build/eval/…` and stamps "fake embedder, not a model" on every row.
+    - `--measured-on` is required, as in t08.
+  - **README check:** a second table between `<!-- eval:begin -->` and `<!-- eval:end -->`, columns Metric | Value | Unit | Measured on | Embedder | Run | Source key, read from `eval/results/<Run>.json`. Fractions are shown to 3 decimals or as %. A vector, hybrid or answer row needs `embedder.kind` `nomic-embed-text`, and an answer row needs an `answers.judge` section.
 - **Acceptance criteria:**
-  - AC-t13-1: the eval file has ≥ 30 questions; each answerable one has a document id and evidence text that exists verbatim in that corpus document (scripted check against the fetched corpus).
-  - AC-t13-2: metric unit tests: on a hand-made ranking, recall@k and MRR equal hand-computed values.
-  - AC-t13-3: one command produces a report with rows for 3 modes × 3 chunk sizes and columns recall@1/@5/@10 and MRR.
-  - AC-t13-4: the report header names the embedder; with the fake embedder the vector and hybrid rows carry the marker "not a model".
+  - AC-t13-1: the eval file has ≥ 30 questions matching the schema; every gold evidence passage exists verbatim in that document's cleaned text (`check_evidence.py`, run here against the fetched corpus: HTTP 200 for all files at the pin).
+  - AC-t13-2: metric unit tests on hand-made rankings: recall@1/5/10, MRR and nDCG@10 equal hand-computed values, including a question with no relevant chunk and one with two.
+  - AC-t13-3: one command produces a results file with rows for the modes asked × 3 chunk sizes; here the committed run has the 3 keyword rows.
+  - AC-t13-4: results name the embedder; the schema rejects `fake`, and a fake-embedder run refuses to write under `eval/results/`.
   - AC-t13-9: running the eval twice on the same index gives identical retrieval metrics.
+  - AC-t13-10: the ACL eval reports 0 leaked chunks for the unauthorised asker (AclAudit), and the authorised recall@5.
+  - AC-t13-11: `EvidenceMatcher` unit tests: the whole passage; 60% of its words in order; 59% (not relevant); the right words in the wrong document (not relevant).
 
 ### Dev B: judge and deterministic checks
-- **Owns:** `src/eval/java/dev/raggateway/eval/judge/{JudgeClient, JudgeVerdict, SpendCap, AnswerScorer}.java`, `src/eval/java/dev/raggateway/eval/DeterministicChecks.java`, `eval/judge/rubric.md`, `eval/judge/prompt.txt`, and tests. Before writing `JudgeClient`, read the structured-output section of the Claude API reference for Java and record what was used in the PR; validate the verdict JSON against its schema regardless.
+- **Owns:**
+  - `src/eval/java/dev/raggateway/eval/judge/{JudgeClient, JudgeVerdict, JudgeSettings, SpendCap, AnswerScorer, AnswerEvalRunner}.java`;
+  - `src/eval/java/dev/raggateway/eval/DeterministicChecks.java`;
+  - `eval/judge/rubric.md`, `eval/judge/prompt.txt`;
+  - tests (WireMock only).
+- **Codes against:** `eval/judge/judge.properties`, `eval/results.schema.json` (`answers`), the `POST /v1/rag/query` contract (D-49), and the Anthropic Java SDK already on the classpath. Structured output uses the class-based `outputConfig(JudgeVerdict.class)`, per the claude-api Java reference (record the section in the PR). The verdict is still validated against its schema, and a malformed one is rejected.
+- **Rules:**
+  - **Model and settings:** the model id, prices, effort and cap are read from `judge.properties`, never hard-coded. Send no `temperature`, `top_p` or `top_k` (Claude Haiku 5.5 rejects non-default sampling). Read content blocks by type, since a response can start with a thinking block.
+  - **Key:** read from `EVAL_JUDGE_API_KEY` only.
+  - **No accidental calls:** the client never runs without `--confirm-spend`, and no test or build step calls the real API (the base URL is WireMock in every test).
+  - **Spend cap:** before each call, the worst case (estimated input tokens × input price + `max-tokens` × output price) must fit the remaining budget, otherwise stop. After each call, add the reported usage. The report says `scored N of M`.
+  - **Dry run:** `--dry-run` builds every prompt, estimates tokens locally (3 characters per token) and prints the estimated total cost without creating a client.
+  - **Rubric:** per answerable question, `correctness` 0/1/2 against the gold evidence, and `grounded` (true when every claim is supported by the cited source text), plus a short reason. Unanswerable questions are scored deterministically (refusal or `no_answer`), not by the judge.
+  - **Calibration:** the owner hand-labels 10 answers and the report gives the judge's agreement with her.
 - **Acceptance criteria:**
-  - AC-t13-6: the judge harness stops when the spend cap is reached and reports how many questions were scored (WireMock-priced test).
-  - AC-t13-7: the judge prompt asks for a structured verdict and the harness rejects a malformed verdict rather than counting it.
-  - AC-t13-8: the deterministic checks pass: citations ⊆ retrieved chunks for all questions; 5 of 5 unanswerable questions produce the refusal (with a mock generator that follows the instruction).
-  - AC-t13-5: the README contains no vector or hybrid recall figure and no answer score until a report with a real embedder and a real judge is committed (reviewer check; in this session those README cells read "pending laptop run").
+  - AC-t13-5: the README contains no vector or hybrid recall figure and no answer score until a results file with `nomic-embed-text` (and, for answers, a judge section) is committed. Until then those cells read "pending laptop run" (reviewer check).
+  - AC-t13-6: the judge harness stops when the spend cap is reached and reports how many questions were scored (WireMock-priced test, with usage in the stubbed responses).
+  - AC-t13-7: the judge request asks for a structured verdict (asserted on the request body sent to WireMock), and the harness rejects a malformed or out-of-range verdict rather than counting it.
+  - AC-t13-8: the deterministic checks pass: citations ⊆ sources for all questions; 5 of 5 unanswerable questions produce the refusal (with a mock generator that follows the instruction).
+  - AC-t13-12: `--dry-run` makes no network call (a WireMock server with no stubs records 0 requests) and prints a cost no greater than the cap; without `--confirm-spend` the real client is never built.
 
 ### Integration step
-Merge A, then B. `./gradlew clean test && ./gradlew eval --args="retrieval --embedder fake"`.
-- **Runs here:** the eval set and checks; a full keyword-only run (Postgres full-text is real, so these numbers are real and labelled); a vector/hybrid smoke run written to a file marked "fake embedder, not for README"; judge tests against WireMock.
-- **Owner only:** index with real `nomic-embed-text`; run all modes and chunk sizes; run answer scoring with her key and spend cap; review the questions and gold evidence; put the numbers in the README.
+Merge A, then B. Run `./gradlew clean build`, then load the corpus (fake embedder) and run `./gradlew eval --args="retrieval --modes keyword --measured-on 'cloud container, 4 vCPU / 15 GB'"`, and commit that results file.
+- **Runs here:**
+  - the eval set and the evidence check;
+  - a full keyword-only run (Postgres full-text is real, so these numbers are real and labelled);
+  - the ACL eval in keyword mode;
+  - a vector/hybrid smoke run into `build/eval/` marked "fake embedder, not for README";
+  - judge tests against WireMock and a dry-run estimate.
+- **Owner only:**
+  - load the corpus with real `nomic-embed-text` and run all modes and chunk sizes;
+  - run answer scoring with her key and cap;
+  - hand-label 10 answers for calibration;
+  - review the questions and gold evidence;
+  - put the numbers in the README.
 
 ---
 

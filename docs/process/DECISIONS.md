@@ -89,6 +89,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-50 | t10 review rulings | 503 `service_unavailable` for an unreachable database or embedder; tag defusing widened (case, width, invisible characters, look-alike brackets); shared label policy; no existence probe; re-index misses the cache |
 | D-51 | Incremental indexing and ACL hardening (R10 prep) | three PUT outcomes under a row lock (unchanged, acl_updated, queued); fenced job updates; retry backoff and dead jobs; idempotent delete; leakage audited independently; key group changes within the 30 s cache TTL |
 | D-52 | R10 review rulings (t11, t12) | retry settings folded into `RagProperties.Worker`; ingest counters at zero; V5 outbox indexes; cross-tenant DELETE stays 204; dead-job and fallback panels and alert rules |
+| D-53 | Eval method (t13 prep) | gold = doc id + verbatim passage; recall@k / MRR / nDCG@10 definitions; 3 modes × 3 chunk sizes; schema-checked results, fake embedder never committed; Haiku 5.5 judge from config, no sampling params, cap enforced per call, dry run; here vs laptop split |
 
 ---
 
@@ -990,4 +991,44 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
     - `RagVectorExactFallbackRising`: fallbacks > 0.5/s for 15 min.
   - No Alertmanager: firing alerts show on Prometheus's Alerts page.
 - **README:** status rows for t11–t12. The indexing limitation now describes the PUT outcomes, fencing, backoff, dead jobs and re-PUT. The key-cache limitation adds that document group changes apply on the next query and that the admin flag gives no chunk access beyond the key's groups.
+
+### D-53. Eval method (t13 prep)
+- **Context:** D-24 put the eval in its own source set with a capped judge; D-18 and D-21 say what can't run here (real embeddings, the real judge). Still open:
+  - how gold labels survive re-chunking;
+  - what exactly recall@k means when several chunks can match;
+  - the matrix;
+  - where results live and how the README is held to them;
+  - the judge's model, settings and cost control.
+- **Gold labels:** a document id plus an evidence passage of 20–400 characters copied verbatim from the document's cleaned text (`load_corpus.document()`, the same cleaning the index sees).
+  - A chunk is relevant if it belongs to that document and contains the passage, or at least 60% of its words in order. One label then works at 200, 400 and 800 tokens.
+  - `scripts/eval/check_evidence.py` proves every passage exists. It runs in Python so cleaning has one implementation.
+  - The eval reads cleaned content from the loaded `documents` table rather than re-cleaning files.
+  - Known bias: questions are written by someone who has read the passage. The guidance is to paraphrase, so the eval doesn't flatter keyword search, and the owner reviews the set.
+- **Metrics:**
+  - recall@k is the share of answerable questions with ≥ 1 relevant chunk in the top k. "Any hit" is used rather than "share of relevant chunks", because a smaller chunk size creates more relevant chunks and would otherwise be penalised.
+  - MRR is the mean reciprocal rank of the first relevant chunk (0 beyond rank 10).
+  - nDCG@10 uses binary relevance, with ideal DCG over min(relevant, 10). It depends on how many chunks match, so it is compared within a chunk size, not across sizes.
+  - Unanswerable questions are scored by refusal; `acl` questions by leaks (`AclAudit`, which must be 0), the unauthorised no-answer share and authorised recall@5.
+- **Matrix:** keyword, vector and hybrid × 200, 400 and 800 target tokens (overlap 25/50/100, max = target), in collections `k8s-c200`, `k8s-c400` and `k8s-c800` of tenant `eval`. ACL and answers run at hybrid/400, the production setting.
+  - **Here:** keyword × 3 for real (Postgres full-text; labelled with the hardware; `embedder.kind: none`), the ACL eval in keyword mode, the judge against WireMock, and the dry-run estimate.
+  - **On the laptop:** everything with `nomic-embed-text`, and the real judge.
+- **Results:** `eval/results/<run_id>.json` per `eval/results.schema.json`, committed.
+  - The schema rejects `embedder.kind: fake`, and with kind `none` it allows keyword rows only. A fake-embedder smoke run writes only under `build/eval/`.
+  - `--measured-on` is required.
+  - The README gets a second checked table (`<!-- eval:begin -->`). A vector, hybrid or answer cell stays "pending laptop run" until a file with a real embedder (and, for answers, a judge section) exists.
+- **Judge** (`eval/judge/judge.properties`):
+  - **Model:** `claude-haiku-5-5` at $0.10 / $0.50 per million input / output tokens for prompts up to 100K. Both are taken from the claude-api reference's model table (cached 2026-11-03), not from memory, and they are configuration.
+  - **Settings:** no `temperature`, `top_p` or `top_k` (Claude Haiku 5.5 rejects non-default sampling); effort `low`; `max_tokens` 2048, because adaptive thinking counts toward it; content blocks read by type; a structured verdict through `outputConfig(JudgeVerdict.class)` and then schema-validated.
+  - **Verdict:** `correctness` 0/1/2, `grounded` (claims supported by the cited source text) and a short reason. Unanswerable questions are checked deterministically, without the judge.
+  - **Spend cap:** 0.50 USD by default, lowerable on the command line. Before each call, the call's worst case (estimated input × input price + max_tokens × output price) must fit what is left; after it, reported usage is added. The report says "scored N of M".
+  - **`--dry-run`** builds the prompts and prints an estimate (3 characters per token) without creating a client. The real client needs `--confirm-spend` and reads its key from `EVAL_JUDGE_API_KEY` only, so the gateway's provider key is never used by accident.
+  - **Calibration:** the owner hand-labels 10 answers; agreement is reported next to the scores.
+- **Never here:** a call to the real Anthropic API, a vector, hybrid or answer number from the fake embedder in any committed file, or a score typed into the README.
+- **Rejected:**
+  - gold chunk ids (they change with every re-chunk);
+  - fraction-of-relevant-chunks recall (biased against small chunks);
+  - judging unanswerables with the LLM (a deterministic check is exact and free);
+  - temperature 0 for the judge (rejected by the model; agreement is measured instead);
+  - `count_tokens` for the dry run (an API call; the local estimate is conservative);
+  - a bigger judge model (cost and latency; the rubric is simple, and calibration shows whether it holds).
 

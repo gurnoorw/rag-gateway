@@ -1,6 +1,6 @@
 # rag-gateway
 
-An LLM gateway with an OpenAI-compatible `POST /v1/chat/completions` endpoint, built in Java 21 and Spring Boot 3, with a RAG endpoint on top (`POST /v1/rag/query`) that answers questions from a tenant's documents, with citations, through the same pipeline. Every number in this README is read from a committed results file and checked by a script; what has not been measured yet says so.
+An LLM gateway with an OpenAI-compatible `POST /v1/chat/completions` endpoint, built in Java 21 and Spring Boot 3, with a RAG endpoint on top (`POST /v1/rag/query`) that answers questions from a tenant's documents, with citations, through the same pipeline. Every measured number in this README is read from a committed results file and checked by a script; design targets are labelled as such, and what has not been measured yet says so.
 
 ## What it is
 
@@ -34,7 +34,7 @@ On the RAG side it:
 | RAG ingestion (t09): document API, outbox, chunking, embeddings into pgvector | Built and tested; embeddings in the build environment come from a deterministic fake (Ollama is not reachable there), and the Ollama adapter is tested against WireMock |
 | RAG query (t10): hybrid retrieval (Postgres full-text + pgvector, reciprocal rank fusion), answers with citations through the chat pipeline | Built and tested against WireMock providers and the fake embedder; retrieval quality is in [Retrieval eval](#retrieval-eval) |
 | RAG hardening (t11–t12): incremental indexing (unchanged, groups-only and changed PUTs), retries with backoff and dead jobs, DELETE, chunk-level ACL leakage suite | Built and tested (fake embedder; leakage suite at 0 leaked chunks) |
-| RAG evaluation (t13): retrieval recall@k / MRR / nDCG, ACL leak check, capped answer judge | Harness built and tested; keyword-only retrieval measured (table below); vector, hybrid and answer scores pending the laptop run with `nomic-embed-text` and a real judge |
+| RAG evaluation (t13): retrieval recall@k / MRR / nDCG, ACL leak check, capped answer judge | Harness built and tested; keyword-only retrieval measured (see [Retrieval eval](#retrieval-eval)); vector, hybrid and answer scores pending the laptop run with `nomic-embed-text` and a real judge |
 | Release (t14): README number, link and release checks; release runbook | Checks built and tested; the steps that need the laptop, real models or an API key are in the [release runbook](docs/RUNBOOK.md) |
 
 ## Quickstart

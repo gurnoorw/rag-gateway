@@ -11,6 +11,7 @@ import dev.raggateway.rag.RetrievalQuery;
 import dev.raggateway.rag.RetrievedChunk;
 import dev.raggateway.support.AbstractIntegrationTest;
 import dev.raggateway.support.OllamaNdjson;
+import dev.raggateway.support.PrometheusScrape;
 import dev.raggateway.support.TestData;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterAll;
@@ -30,10 +31,13 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
@@ -60,6 +64,8 @@ class RagQueryIT extends AbstractIntegrationTest {
     static final ObjectMapper JSON = new ObjectMapper();
     static final WireMockServer CLAUDE = startWireMock();
     static final WireMockServer OLLAMA = startWireMock();
+    /** Every tenant this class created; earlier tests' tenants are deleted by the base cleanup, their series stay. */
+    static final Set<String> CREATED_TENANTS = ConcurrentHashMap.newKeySet();
 
     final String suffix = UUID.randomUUID().toString().substring(0, 8);
     final String tenant = "rag-q-" + suffix;
@@ -101,6 +107,7 @@ class RagQueryIT extends AbstractIntegrationTest {
         CLAUDE.resetAll();
         OLLAMA.resetAll();
         retriever.reset();
+        CREATED_TENANTS.addAll(Set.of(tenant, brokeTenant));
         TestData.insertTenant(jdbc, tenant, 1_000_000, BigDecimal.TEN, Set.of());
         TestData.insertKey(jdbc, tenant, key, Set.of("eng", "ops"), false);
         TestData.insertTenant(jdbc, brokeTenant, 1_000_000, BigDecimal.ZERO, Set.of()); // budget 0: every call 429
@@ -427,5 +434,56 @@ class RagQueryIT extends AbstractIntegrationTest {
         assertThat(error.get("request_id").asText()).isEqualTo(requestId(r).toString());
         assertThat(logRow(r).get("error_code")).isEqualTo("all_providers_failed");
         assertThat(ragQueries(RagService.ERROR)).isEqualTo(1.0);
+    }
+
+    // ---- AC-t10-16 ----
+
+    @Test
+    void ac_t10_16_aScrapeAfterRagQueriesCarriesOnlyBoundedLabels() throws Exception {
+        String answeredQuestion = "label policy answered " + suffix;
+        String emptyQuestion = "label policy empty " + suffix;
+        retriever.returning(FakeRetriever.chunks(2));
+        claudeAnswers("Fact [S1].");
+        HttpResponse<String> answered = rag(key, query(answeredQuestion));
+        retriever.returning(List.of());
+        HttpResponse<String> empty = rag(key, query(emptyQuestion));
+        retriever.returning(FakeRetriever.chunks(2));
+        HttpResponse<String> rejected = rag(brokeKey, query(answeredQuestion));
+        assertThat(List.of(answered.statusCode(), empty.statusCode(), rejected.statusCode()))
+                .containsExactly(200, 200, 429);
+        List<String> requestData = List.of(key, brokeKey, answeredQuestion, emptyQuestion,
+                requestId(answered).toString(), requestId(empty).toString(), requestId(rejected).toString(),
+                "chunk-1", "doc-1", "Title 1", "Fact number");
+        Set<String> tenantsThatExist = new HashSet<>(CREATED_TENANTS);
+        tenantsThatExist.addAll(jdbc.sql("SELECT id FROM tenants").query(String.class).list());
+        Map<String, Set<String>> bounded = Map.of(
+                "mode", Set.of("hybrid", "vector", "keyword"),
+                "leg", Set.of("keyword", "vector", "embed"),
+                "result", Set.of(RagService.ANSWERED, RagService.NO_SOURCES, RagService.ERROR));
+
+        PrometheusScrape scrape = PrometheusScrape.fetch(baseUrl());
+
+        List<String> violations = new ArrayList<>();
+        for (PrometheusScrape.Sample s : scrape.samples()) {
+            if (!s.name().startsWith("rag_")) continue;
+            s.labels().forEach((label, value) -> {
+                if (!MetricNames.ALLOWED_LABELS.contains(label) && !"le".equals(label)) {
+                    violations.add(s.name() + ": label " + label + " is not allowed");
+                } else if (label.equals("tenant") && !tenantsThatExist.contains(value)) {
+                    violations.add(s.name() + ": tenant " + value + " does not exist");
+                } else if (bounded.containsKey(label) && !bounded.get(label).contains(value)) {
+                    violations.add(s.name() + ": " + label + "=" + value + " is not bounded");
+                }
+                for (String fragment : requestData) {
+                    if (value.contains(fragment)) violations.add(s.name() + ": " + label + " carries request data");
+                }
+            });
+        }
+        assertThat(violations).isEmpty();
+        String queries = PrometheusScrape.prometheusBase(MetricNames.RAG_QUERIES) + "_total";
+        assertThat(scrape.labelNames(queries::equals)).containsExactlyInAnyOrder("tenant", "result");
+        assertThat(scrape.sum(queries, Map.of("tenant", tenant, "result", RagService.ANSWERED))).isEqualTo(1.0);
+        assertThat(scrape.sum(queries, Map.of("tenant", tenant, "result", RagService.NO_SOURCES))).isEqualTo(1.0);
+        assertThat(scrape.sum(queries, Map.of("tenant", brokeTenant, "result", RagService.ERROR))).isEqualTo(1.0);
     }
 }

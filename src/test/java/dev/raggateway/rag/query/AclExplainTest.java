@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Reads {@code EXPLAIN (FORMAT JSON)} and walks the plan tree, so the check does not depend on the text layout.
  */
-class AclExplainIT extends AbstractPostgresTest {
+class AclExplainTest extends AbstractPostgresTest {
 
     static final ObjectMapper JSON = new ObjectMapper();
     static final FakeEmbedder EMBEDDER = new FakeEmbedder();

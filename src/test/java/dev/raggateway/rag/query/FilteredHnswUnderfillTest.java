@@ -50,7 +50,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       exact re-run fills the list in exact distance order, and {@code rag.retrieval.vector.exact_fallback} is 1.</li>
  * </ul>
  */
-class FilteredHnswUnderfillIT extends AbstractPostgresTest {
+class FilteredHnswUnderfillTest extends AbstractPostgresTest {
 
     static final String TENANT = "t-underfill-" + UUID.randomUUID();
     static final String COLLECTION = "underfill";

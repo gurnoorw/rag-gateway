@@ -29,7 +29,10 @@ public final class RetrievalSql {
 
     /**
      * Keyword leg: Postgres full-text ranking by {@code ts_rank_cd} (cover density, C18; it has no IDF term),
-     * best first, ties by chunk id so the order is stable (AC-t10-9). Uses the GIN index on {@code tsv}.
+     * best first. Ties go by document id and chunk ordinal, which are unique within a tenant and collection and stay
+     * the same when a document is re-indexed, unlike the random chunk id the t10 version used: equal ranks are
+     * common, and a re-index used to reorder them, so eval results moved between index builds (t13 review,
+     * D-54). Uses the GIN index on {@code tsv}.
      */
     public static final String KEYWORD = """
             SELECT c.chunk_id, c.doc_id, c.title, c.ordinal, c.text,
@@ -39,7 +42,7 @@ public final class RetrievalSql {
                AND c.collection_id = :collection
                AND c.acl_groups && CAST(:groups AS text[])
                AND c.tsv @@ %1$s
-             ORDER BY rank DESC, c.chunk_id
+             ORDER BY rank DESC, c.doc_id, c.ordinal
              LIMIT :limit
             """.formatted(KEYWORD_TSQUERY);
 

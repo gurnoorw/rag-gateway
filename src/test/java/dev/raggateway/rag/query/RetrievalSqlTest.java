@@ -94,6 +94,18 @@ class RetrievalSqlTest extends AbstractPostgresTest {
     }
 
     @Test
+    void keywordTiesAreOrderedByDocumentAndOrdinalSoAReindexKeepsTheOrder() {
+        // Three chunks with identical text rank equally; the order must not depend on their random chunk ids.
+        RagFixtures.document(jdbc, tenant, "k8s", "zz.tie", "Tie", Set.of("eng"), EMBEDDER,
+                "quokka quokka", "quokka quokka");
+        RagFixtures.document(jdbc, tenant, "k8s", "aa.tie", "Tie", Set.of("eng"), EMBEDDER, "quokka quokka");
+        List<String> docOrdinals = jdbc.sql(RetrievalSql.KEYWORD).param("tenant", tenant).param("collection", "k8s")
+                .param("groups", new String[]{"eng"}).param("question", "quokka").param("limit", 10)
+                .query((rs, n) -> rs.getString("doc_id") + "#" + rs.getInt("ordinal")).list();
+        assertThat(docOrdinals).containsExactly("aa.tie#0", "zz.tie#0", "zz.tie#1");
+    }
+
+    @Test
     void keywordLegKeepsToTheTenantCollectionAndGroups() {
         assertThat(keyword(tenant, "maxSurge", "eng")).containsExactly(
                 "Set maxSurge to control how many extra Pods a rolling update may create.");

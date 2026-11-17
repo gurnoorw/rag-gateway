@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RAG eval run results (t13)",
+  "description": "One file per run: eval/results/<run_id>.json, written by ./gradlew eval and committed. Every eval number in the README must be read from one of these files (scripts/check_readme_numbers.py). Fractions are in [0,1]; money is USD. A committed file never comes from the fake embedder: keyword-only runs record embedder kind 'none', vector and hybrid rows need 'nomic-embed-text'. A section that was not run is absent, never zero. See docs/process/WORK_PLAN.md (t13) and DECISIONS.md D-53.",
+  "type": "object",
+  "required": ["run_id", "measured_on", "date", "git_commit", "corpus", "embedder", "retrieval"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {"type": "string", "pattern": "^[0-9]{8}T[0-9]{4}Z-[a-z0-9-]+$"},
+    "measured_on": {"type": "string", "minLength": 3, "description": "Hardware label (C14), e.g. 'cloud container, 4 vCPU / 15 GB' or '8 GB MacBook Air'."},
+    "date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "git_commit": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "corpus": {
+      "type": "object",
+      "required": ["repo", "commit", "documents", "eval_set", "questions"],
+      "additionalProperties": false,
+      "properties": {
+        "repo": {"const": "kubernetes/website"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "documents": {"type": "integer", "minimum": 1},
+        "eval_set": {"type": "string", "pattern": "^questions\\.v[0-9]+$"},
+        "questions": {"type": "integer", "minimum": 30}
+      }
+    },
+    "embedder": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["none", "nomic-embed-text"], "description": "'none': keyword-only run, no vectors were compared. The fake embedder is not allowed here (D-18, D-53)."},
+        "note": {"type": "string"}
+      }
+    },
+    "retrieval": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["mode", "chunk_target_tokens", "questions", "recall_at_1", "recall_at_5", "recall_at_10", "mrr", "ndcg_at_10"],
+        "additionalProperties": false,
+        "properties": {
+          "mode": {"enum": ["keyword", "vector", "hybrid"]},
+          "chunk_target_tokens": {"enum": [200, 400, 800]},
+          "questions": {"type": "integer", "minimum": 1, "description": "Answerable questions scored (unanswerable and ACL-only questions excluded)."},
+          "recall_at_1": {"$ref": "#/$defs/fraction"},
+          "recall_at_5": {"$ref": "#/$defs/fraction"},
+          "recall_at_10": {"$ref": "#/$defs/fraction"},
+          "mrr": {"$ref": "#/$defs/fraction"},
+          "ndcg_at_10": {"$ref": "#/$defs/fraction"}
+        }
+      }
+    },
+    "acl": {
+      "type": "object",
+      "required": ["mode", "chunk_target_tokens", "questions", "unauthorised_leaked_chunks", "unauthorised_no_answer_fraction", "authorised_recall_at_5"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["keyword", "vector", "hybrid"]},
+        "chunk_target_tokens": {"enum": [200, 400, 800]},
+        "questions": {"type": "integer", "minimum": 1},
+        "unauthorised_leaked_chunks": {"type": "integer", "minimum": 0, "description": "Chunk ids shown to a key without the group, counted by AclAudit (D-51). Must be 0."},
+        "unauthorised_no_answer_fraction": {"$ref": "#/$defs/fraction"},
+        "authorised_recall_at_5": {"$ref": "#/$defs/fraction"}
+      }
+    },
+    "answers": {
+      "type": "object",
+      "required": ["judge", "scored", "of", "correct_fraction", "correctness_mean", "grounded_fraction", "citations_valid_fraction", "unanswerable"],
+      "additionalProperties": false,
+      "properties": {
+        "judge": {
+          "type": "object",
+          "required": ["model", "price_input_usd_per_mtok", "price_output_usd_per_mtok", "price_source", "effort", "cap_usd", "spent_usd"],
+          "additionalProperties": false,
+          "properties": {
+            "model": {"type": "string", "pattern": "^claude-"},
+            "price_input_usd_per_mtok": {"type": "number", "minimum": 0},
+            "price_output_usd_per_mtok": {"type": "number", "minimum": 0},
+            "price_source": {"type": "string", "minLength": 3},
+            "effort": {"enum": ["low", "medium", "high"]},
+            "cap_usd": {"type": "number", "exclusiveMinimum": 0},
+            "spent_usd": {"type": "number", "minimum": 0}
+          }
+        },
+        "generator_mode": {"enum": ["keyword", "vector", "hybrid"]},
+        "chunk_target_tokens": {"enum": [200, 400, 800]},
+        "scored": {"type": "integer", "minimum": 0},
+        "of": {"type": "integer", "minimum": 1},
+        "correct_fraction": {"$ref": "#/$defs/fraction"},
+        "correctness_mean": {"type": "number", "minimum": 0, "maximum": 2},
+        "grounded_fraction": {"$ref": "#/$defs/fraction"},
+        "citations_valid_fraction": {"$ref": "#/$defs/fraction"},
+        "unanswerable": {
+          "type": "object",
+          "required": ["questions", "refused"],
+          "additionalProperties": false,
+          "properties": {"questions": {"type": "integer", "minimum": 1}, "refused": {"type": "integer", "minimum": 0}}
+        },
+        "calibration": {
+          "type": "object",
+          "required": ["hand_labelled", "agreement_fraction"],
+          "additionalProperties": false,
+          "properties": {"hand_labelled": {"type": "integer", "minimum": 1}, "agreement_fraction": {"$ref": "#/$defs/fraction"}}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"embedder": {"properties": {"kind": {"const": "none"}}}}},
+      "then": {"properties": {
+        "retrieval": {"items": {"properties": {"mode": {"const": "keyword"}}}},
+        "acl": {"properties": {"mode": {"const": "keyword"}}},
+        "answers": {"properties": {"generator_mode": {"const": "keyword"}}}
+      }}
+    }
+  ],
+  "$defs": {
+    "fraction": {"type": "number", "minimum": 0, "maximum": 1}
+  }
+}

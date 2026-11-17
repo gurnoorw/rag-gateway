@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RAG eval question (one JSON object per line of eval/questions.v<N>.jsonl, t13)",
+  "description": "Gold labels name a document of the pinned corpus (kubernetes/website at adaa04d017c75981660828f869b364a266b0ef53) and a short evidence passage copied verbatim from that document's cleaned text (scripts/corpus/load_corpus.py document()), so labels survive re-chunking. See DECISIONS.md D-53.",
+  "type": "object",
+  "required": ["id", "kind", "question", "expected", "gold"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {"type": "string", "pattern": "^q[0-9]{2,3}$"},
+    "kind": {"enum": ["conceptual", "exact_term", "unanswerable", "acl"]},
+    "question": {"type": "string", "minLength": 10, "maxLength": 2000},
+    "expected": {"enum": ["answer", "refusal"], "description": "What a caller allowed to see the gold documents should get. refusal: the corpus does not answer it (unanswerable). An acl question is asked twice: by a key with required_groups (expected answer) and by a key without them (always no leaked chunk and a no-answer or refusal)."},
+    "gold": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["doc_id", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "doc_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"},
+          "evidence": {"type": "string", "minLength": 20, "maxLength": 400}
+        }
+      }
+    },
+    "required_groups": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"}, "minItems": 1, "uniqueItems": true},
+    "notes": {"type": "string"}
+  },
+  "allOf": [
+    {"if": {"properties": {"kind": {"const": "unanswerable"}}},
+     "then": {"properties": {"expected": {"const": "refusal"}, "gold": {"maxItems": 0}}}},
+    {"if": {"properties": {"kind": {"enum": ["conceptual", "exact_term", "acl"]}}},
+     "then": {"properties": {"gold": {"minItems": 1}}}},
+    {"if": {"properties": {"kind": {"const": "acl"}}},
+     "then": {"required": ["required_groups"], "properties": {"expected": {"const": "answer"}}}}
+  ]
+}

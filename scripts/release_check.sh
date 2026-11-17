@@ -62,7 +62,12 @@ run_script() { # name, then the command
     ok "$name" "$summary"
   else
     fail "$name" "${summary:-exit $rc} (exit $rc)"
-    grep -vF -- "$summary" "$work/$name.out" | detail "$name" 40
+    if [ -n "$last" ]; then
+      # the problems a script lists after its FAIL line, not its informational output before it
+      sed -n "/^$(printf '%s' "${last%% *}") /,\$p" "$work/$name.out" | tail -n +2 | detail "$name" 40
+    else
+      detail "$name" 40 < "$work/$name.out"
+    fi
   fi
 }
 

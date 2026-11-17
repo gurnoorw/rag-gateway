@@ -628,7 +628,7 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=Non
         print(f"release mode: {len(pending)} pending cell(s), {allowed} on the allowlist, "
               f"{len(pending) - allowed} blocking", file=out)
     if failures.items:
-        print(f"FAIL ({len(failures.items)}):", file=out)
+        print(f"FAIL ({len(failures.items)}): {len(failures.items)} problem(s), listed below", file=out)
         for f in failures.items:
             print(f"  {f}", file=out)
         return 1

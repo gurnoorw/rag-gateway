@@ -42,7 +42,7 @@ Private task notes drafted by: t01 A, t02 B, t03 A, t04 B, t05 A, t06 A, t07 B, 
 | V2 | tenants, api_keys | t01 |
 | V3 | request_log | t01 |
 | V4 | documents, chunks, outbox | t09 |
-| V5 | reserved for t11 (only if a new index is needed) | t11 |
+| V5 | outbox indexes: `document_id`, partial on DEAD (t11 review) | t11 |
 | V6 | reserved for t12 (only if needed) | t12 |
 
 ---
@@ -688,7 +688,7 @@ Merge A, then B. Run `./gradlew clean build`. Then, with the corpus loaded (fake
 
 - **Owns:**
   - edits in `rag/query/**` only, if a fix is needed (`ChunkSearchRepository`, `HybridRetriever`, `RagService`);
-  - tests `RagAclLeakageIT`, `FilteredHnswUnderfillIT`, `AclExplainIT` in `rag/query`;
+  - tests `RagAclLeakageIT`, `FilteredHnswUnderfillTest`, `AclExplainTest` in `rag/query`;
   - `src/test/resources/rag/acl-questions.jsonl`: 10 questions whose only relevant fixture documents are restricted, each with the group it needs. t13 adapts these to the real corpus.
   - Does not touch `application.yml` (defaults in code) or `rag/ingest/**`. AC-t12-7 drives a PUT over HTTP and calls `IndexingWorker.pollOnce()`; it does not edit either.
 - **Acceptance criteria:**

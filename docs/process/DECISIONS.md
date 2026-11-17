@@ -88,6 +88,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-49 | Retrieval and RAG answer details (t10 prep) | exact OR keyword SQL; ACL/tenant in both legs; `ef_search` 100 + strict iterative scan per query; RRF tie rule; S-labelled delimited prompt through the shared pipeline; no-sources answer without a call; keyword-only degradation; amended: exact re-run when the HNSW pass is short |
 | D-50 | t10 review rulings | 503 `service_unavailable` for an unreachable database or embedder; tag defusing widened (case, width, invisible characters, look-alike brackets); shared label policy; no existence probe; re-index misses the cache |
 | D-51 | Incremental indexing and ACL hardening (R10 prep) | three PUT outcomes under a row lock (unchanged, acl_updated, queued); fenced job updates; retry backoff and dead jobs; idempotent delete; leakage audited independently; key group changes within the 30 s cache TTL |
+| D-52 | R10 review rulings (t11, t12) | retry settings folded into `RagProperties.Worker`; ingest counters at zero; V5 outbox indexes; cross-tenant DELETE stays 204; dead-job and fallback panels and alert rules |
 
 ---
 
@@ -957,4 +958,36 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - Instant revocation would need an invalidation broadcast (Redis pub/sub) or no cache (a database read per request). Neither is justified now. Documented as a limitation.
 - **Admin keys:** retrieve with their own groups. "Admin" only governs writes and document metadata (D-49). A tenant-wide reader would be a separate, explicit group.
 - **Ownership:** t11 edits only `rag/ingest/**` and `application.yml`; t12 edits only `rag/query/**`. Shared code (`support/`, `metrics/`, `auth/`, `error/`, migrations) is frozen for the round. t11 merges first.
+
+### D-52. R10 review rulings (t11, t12)
+- **Checked, and why each holds:**
+  - **ACL fast path consistency.** `DocumentService.upsert` is `@Transactional`. The row lock, the document update and `UPDATE chunks SET acl_groups` all run on its connection, so any failure rolls back both groups together.
+    - A swap racing it either waits on the row lock or finds a different hash (groups are in the hash) and writes nothing (D-48).
+    - So chunk groups can't diverge from document groups.
+  - **Dead letters.** `markDead` locks the document row, then fences the job (`attempts = ?` and `IN_PROGRESS`). It sets the document `failed` only if the document still holds that job's hash and is `queued`, all in one transaction, with the lock order of the PUT, swap and delete (document, then children).
+    - The gauge counts DEAD jobs with no newer job for their document, so a re-PUT or a delete resolves it.
+    - The stuck-job guard (a claim with attempts above the limit goes DEAD without processing) covers a worker that died after claiming its last attempt.
+  - **Leakage suite.** Dev B showed it detects leaks: removing the ACL predicate fails 14 of 22 tests, and removing the tenant predicate fails 4.
+- **a. Retry settings:** folded into `RagProperties.Worker` (`max-attempts`, `retry-base`, `retry-max`, same keys).
+  - The backoff arithmetic stays in a plain value type, `RetryPolicy` (formerly `WorkerRetryProperties`), built by `Worker.retryPolicy()`.
+  - `RagConfig` passes it, with the `IngestMetrics` bean, to the worker's constructor. The `@Autowired use(...)` method injection is gone, so the worker's fields are final and there is one source of `gateway.rag.worker` settings.
+- **b. Dev A's dead-job handling:** accepted as described above. `DocumentStore.markFailed` is gone because `failed` is only ever set together with the dead job.
+- **c. Ingest counters:** registered at zero for every `result` value at startup (D-38 pattern), now that `RagQueryIT` only bounds `rag_queries`. A rate or alert on `dead` or `retried` then reads 0, not "no data".
+- **d. Concurrency and delete:**
+  - **Concurrent first PUTs:** two concurrent first PUTs of a new document can both queue a job, because there is no row to lock yet; `ON CONFLICT` serialises the insert. Accepted: the second job does a redundant but idempotent swap of the same version.
+  - **V5 (the reserved t11 migration), now used:** `outbox_document (document_id, created_at)` and a partial `outbox_dead (created_at) WHERE status = 'DEAD'`. The outbox had no `document_id` index, so a document delete's cascade, `markDead`'s join and the gauge's "no newer job" check all scanned the outbox, which keeps every DONE row. Pruning DONE rows is a noted follow-up, not built.
+  - **DELETE with an invalid id → 400:** accepted.
+  - **Another tenant's DELETE → 204, deleting nothing:** kept. DELETE is idempotent and answers the same for "never existed", "already deleted" and "someone else's", so it reveals nothing. GET must say whether something is there, so it says 404 for all three of those cases. Both endpoints are consistent about not distinguishing other tenants from absence.
+- **e. Dev B's choices:** accepted, with one rename.
+  - Restricted rows between the clusters still show the on/off contrast and the counted fallback.
+  - The two plain-Postgres classes are renamed to `FilteredHnswUnderfillTest` and `AclExplainTest`, matching the repository's convention (`*IT` boots the application; the plan's names were wrong).
+  - Leakage tests send the cache-bypass header so every question exercises retrieval and the provider; the cache path has its own tests (AC-t12-8).
+  - The Claude stub citing `[S1][S2]` is accepted.
+- **Monitoring:**
+  - The dashboard gains "Indexing: dead jobs and outcomes" (`rag_outbox_dead`, `rag_ingest_documents_total` by result) and "Vector search exact fallbacks".
+  - `ops/prometheus/alerts.yml` (loaded through `rule_files` and mounted in the `obs` profile; checked with `promtool`) adds two rules:
+    - `RagDeadIndexingJobs`: dead jobs > 0 for 5 min;
+    - `RagVectorExactFallbackRising`: fallbacks > 0.5/s for 15 min.
+  - No Alertmanager: firing alerts show on Prometheus's Alerts page.
+- **README:** status rows for t11–t12. The indexing limitation now describes the PUT outcomes, fencing, backoff, dead jobs and re-PUT. The key-cache limitation adds that document group changes apply on the next query and that the admin flag gives no chunk access beyond the key's groups.
 

@@ -118,6 +118,24 @@ gateway:
     ttl: 6h
     lock-ttl: 30s
     poll-interval: 50ms
+  # RAG ingestion (t09, D-47). Defaults in RagProperties; listed here for visibility. The Ollama embedder uses
+  # gateway.providers.ollama.base-url. embedder: fake runs without Ollama (feature hashing, not a model, D-18).
+  rag:
+    embedder: ollama
+    embed-model: nomic-embed-text
+    embed-batch-size: 20         # chunks per /api/embed call
+    embed-timeout: 60s
+    max-document-bytes: 1MB      # PUT body limit, checked before parsing (413)
+    max-concurrent-writes: 4     # PUTs past the write filter per instance; the next gets 503 overloaded
+    chunk:
+      target-tokens: 400         # estimated tokens (3 characters per token)
+      overlap-tokens: 50
+      max-tokens: 400
+    worker:
+      enabled: true              # off under the test profile
+      poll-delay: 1s             # fixed delay: polls never overlap
+      claim-batch: 4
+      lease: 5m
   # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
   # tools on the same machine, which could silently point the gateway at another host or account.
   providers:

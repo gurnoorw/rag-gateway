@@ -22,6 +22,12 @@ sourceSets {
 val evalImplementation by configurations.getting { extendsFrom(configurations.implementation.get()) }
 val evalRuntimeOnly by configurations.getting { extendsFrom(configurations.runtimeOnly.get()) }
 
+// Eval tests (t13) live in src/test and run in ./gradlew test: the test source set sees the eval classes.
+sourceSets.test {
+    compileClasspath += sourceSets["eval"].output
+    runtimeClasspath += sourceSets["eval"].output
+}
+
 dependencies {
     implementation(platform(libs.spring.boot.bom))
     implementation(platform(libs.resilience4j.bom))
@@ -86,10 +92,12 @@ tasks.bootRun {
     jvmArgs("-Xmx512m")
 }
 
-// t13: ./gradlew eval --args="..."  (the main class is written in t13)
+// t13: ./gradlew eval --args="retrieval --modes keyword --measured-on '<hardware label>'"  (see EvalMain)
 tasks.register<JavaExec>("eval") {
     group = "verification"
     description = "Runs the RAG eval harness (t13)."
     classpath = sourceSets["eval"].runtimeClasspath
     mainClass = "dev.raggateway.eval.EvalMain"
+    workingDir = projectDir   // relative paths (eval/, data/, build/eval/) are the repository's
+    jvmArgs("-Xmx512m")       // same heap as the app (CLAUDE.md overrides)
 }

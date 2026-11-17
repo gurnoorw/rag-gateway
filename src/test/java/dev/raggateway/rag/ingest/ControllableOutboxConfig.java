@@ -101,18 +101,23 @@ class ControllableOutboxConfig {
         }
 
         @Override
-        public void markDone(UUID id) {
-            delegate.markDone(id);
+        public boolean markDone(UUID id, int attempt) {
+            return delegate.markDone(id, attempt);
         }
 
         @Override
-        public void release(UUID id, String error) {
-            delegate.release(id, error);
+        public boolean release(UUID id, int attempt, String error, Duration retryAfter) {
+            return delegate.release(id, attempt, error, retryAfter);
         }
 
         @Override
-        public void markDead(UUID id, String error) {
-            delegate.markDead(id, error);
+        public DeadLetter markDead(UUID id, int attempt, String error) {
+            return delegate.markDead(id, attempt, error);
+        }
+
+        @Override
+        public long countUnresolvedDead() {
+            return delegate.countUnresolvedDead();
         }
     }
 }

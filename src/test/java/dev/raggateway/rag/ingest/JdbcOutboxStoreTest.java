@@ -36,7 +36,7 @@ class JdbcOutboxStoreTest extends AbstractPostgresTest {
 
     static final Duration LEASE = Duration.ofMinutes(5);
 
-    final JdbcOutboxStore outbox = new JdbcOutboxStore(jdbc);
+    final JdbcOutboxStore outbox = new JdbcOutboxStore(jdbc, new DataSourceTransactionManager(dataSource));
     final JdbcDocumentStore documents = new JdbcDocumentStore(jdbc);
     final String tenant = "outbox-" + UUID.randomUUID();
 
@@ -112,24 +112,28 @@ class JdbcOutboxStoreTest extends AbstractPostgresTest {
                 .extracting(OutboxEvent::attempts).isEqualTo(2);
     }
 
+    OutboxEvent claimed(List<OutboxEvent> events, UUID id) {
+        return events.stream().filter(e -> e.id().equals(id)).findFirst().orElseThrow();
+    }
+
     @Test
     void releaseMakesTheJobPendingWithTheErrorAndDoneOrDeadAreNeverClaimed() {
         UUID a = job("a");
         UUID b = job("b");
         UUID c = job("c");
-        drain(10);
+        List<OutboxEvent> got = drain(10);
 
-        outbox.release(a, "embedder down");
-        outbox.markDone(b);
-        outbox.markDead(c, "x".repeat(5_000));
+        assertThat(outbox.release(a, claimed(got, a).attempts(), "embedder down", Duration.ZERO)).isTrue();
+        assertThat(outbox.markDone(b, claimed(got, b).attempts())).isTrue();
+        assertThat(outbox.markDead(c, claimed(got, c).attempts(), "x".repeat(5_000)).dead()).isTrue();
 
         assertThat(status(a)).isEqualTo("PENDING");
         assertThat(jdbc.sql("SELECT last_error FROM outbox WHERE id = :id").param("id", a).query(String.class).single())
                 .isEqualTo("embedder down");
         assertThat(jdbc.sql("SELECT length(last_error) FROM outbox WHERE id = :id").param("id", c).query(Integer.class)
                 .single()).isEqualTo(JdbcOutboxStore.MAX_ERROR_CHARS);
-        assertThat(jdbc.sql("SELECT lease_until IS NULL FROM outbox WHERE id = :id").param("id", a).query(Boolean.class)
-                .single()).isTrue();
+        assertThat(jdbc.sql("SELECT lease_until IS NULL FROM outbox WHERE id IN (:ids)").param("ids", List.of(b, c))
+                .query(Boolean.class).list()).containsOnly(true);
 
         // Expire every lease: only the released job comes back.
         jdbc.sql("UPDATE outbox SET lease_until = now() - interval '1 second' WHERE id IN (:ids)")
@@ -137,6 +141,93 @@ class JdbcOutboxStoreTest extends AbstractPostgresTest {
         assertThat(drain(10)).extracting(OutboxEvent::id).contains(a).doesNotContain(b, c);
         assertThat(status(b)).isEqualTo("DONE");
         assertThat(status(c)).isEqualTo("DEAD");
+    }
+
+    /** Seconds from the database's now() to the job's lease_until. */
+    double secondsUntilLease(UUID id) {
+        return jdbc.sql("SELECT EXTRACT(EPOCH FROM lease_until - now())::float8 FROM outbox WHERE id = :id")
+                .param("id", id).query(Double.class).single();
+    }
+
+    /** Moves the database clock forward for this job only, as far as its retry time is concerned. */
+    void timePasses(UUID id, Duration d) {
+        jdbc.sql("UPDATE outbox SET lease_until = lease_until - :ms * interval '1 millisecond' WHERE id = :id")
+                .param("ms", d.toMillis()).param("id", id).update();
+    }
+
+    @Test
+    void aReleasedJobWaitsOutItsRetryTimeInLeaseUntilAndIsThenClaimedAgain() {
+        UUID a = job("a");
+        OutboxEvent first = claimed(drain(10), a);
+
+        assertThat(outbox.release(a, first.attempts(), "embedder down", Duration.ofMinutes(2))).isTrue();
+
+        assertThat(status(a)).isEqualTo("PENDING");
+        assertThat(secondsUntilLease(a)).isBetween(110.0, 120.0);
+        assertThat(drain(10)).extracting(OutboxEvent::id).doesNotContain(a);   // PENDING, but not due yet
+
+        timePasses(a, Duration.ofSeconds(100));
+        assertThat(drain(10)).extracting(OutboxEvent::id).doesNotContain(a);   // still ~20 s ahead
+        timePasses(a, Duration.ofSeconds(20));
+        assertThat(claimed(drain(10), a).attempts()).isEqualTo(2);              // due: claimed, attempt counted
+    }
+
+    @Test
+    void fencing_aClaimantWhoseLeaseRanOutChangesNothing() {
+        UUID a = job("a");
+        OutboxEvent stale = claimed(drain(10), a);
+        jdbc.sql("UPDATE outbox SET lease_until = now() - interval '1 second' WHERE id = :id").param("id", a).update();
+        OutboxEvent current = claimed(drain(10), a);
+        assertThat(current.attempts()).isEqualTo(stale.attempts() + 1);
+        var before = jdbc.sql("SELECT status, attempts, lease_until, last_error FROM outbox WHERE id = :id")
+                .param("id", a).query().singleRow();
+
+        assertThat(outbox.markDone(a, stale.attempts())).isFalse();
+        assertThat(outbox.release(a, stale.attempts(), "late", Duration.ZERO)).isFalse();
+        assertThat(outbox.markDead(a, stale.attempts(), "late")).isEqualTo(new OutboxStore.DeadLetter(false, false));
+
+        assertThat(jdbc.sql("SELECT status, attempts, lease_until, last_error FROM outbox WHERE id = :id")
+                .param("id", a).query().singleRow()).isEqualTo(before);
+        // The current owner's call goes through, once.
+        assertThat(outbox.markDone(a, current.attempts())).isTrue();
+        assertThat(outbox.markDone(a, current.attempts())).isFalse();
+        assertThat(status(a)).isEqualTo("DONE");
+    }
+
+    @Test
+    void markDeadFailsTheDocumentOnlyWhileItHoldsTheJobsHashAndIsQueued() {
+        // Job for the version the document holds: dead, and the document is failed.
+        UUID docA = documents.upsert(new DocumentUpsert(tenant, "c", "a", "T", "body a", Set.of("eng")));
+        String hashA = documents.findById(docA).orElseThrow().contentHash();
+        UUID a = outbox.insert(docA, hashA);
+        // Job for an older version: dead, but a newer PUT owns the document.
+        UUID docB = documents.upsert(new DocumentUpsert(tenant, "c", "b", "T", "body b", Set.of("eng")));
+        UUID b = outbox.insert(docB, "0".repeat(64));
+        List<OutboxEvent> got = drain(10);
+
+        assertThat(outbox.markDead(a, claimed(got, a).attempts(), "boom")).isEqualTo(new OutboxStore.DeadLetter(true, true));
+        assertThat(outbox.markDead(b, claimed(got, b).attempts(), "boom")).isEqualTo(new OutboxStore.DeadLetter(true, false));
+
+        assertThat(documents.findById(docA).orElseThrow().status()).isEqualTo(DocumentStatus.FAILED);
+        assertThat(documents.findById(docB).orElseThrow().status()).isEqualTo(DocumentStatus.QUEUED);
+    }
+
+    @Test
+    void unresolvedDeadJobsAreCountedUntilANewerJobOrADeleteResolvesThem() {
+        long base = outbox.countUnresolvedDead();
+        UUID docA = documents.upsert(new DocumentUpsert(tenant, "c", "a", "T", "body a", Set.of("eng")));
+        UUID a = outbox.insert(docA, "h".repeat(64));
+        UUID docB = documents.upsert(new DocumentUpsert(tenant, "c", "b", "T", "body b", Set.of("eng")));
+        UUID b = outbox.insert(docB, "h".repeat(64));
+        List<OutboxEvent> got = drain(10);
+        outbox.markDead(a, claimed(got, a).attempts(), "boom");
+        outbox.markDead(b, claimed(got, b).attempts(), "boom");
+        assertThat(outbox.countUnresolvedDead()).isEqualTo(base + 2);
+
+        outbox.insert(docA, "h".repeat(64));                       // a re-PUT queued a new job for a
+        assertThat(outbox.countUnresolvedDead()).isEqualTo(base + 1);
+        documents.delete(tenant, "c", "b");                          // b deleted: its jobs cascade
+        assertThat(outbox.countUnresolvedDead()).isEqualTo(base);
     }
 
     @Test

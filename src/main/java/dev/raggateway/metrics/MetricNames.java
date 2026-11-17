@@ -63,9 +63,12 @@ public final class MetricNames {
     public static final String VALIDATION_FAILURES = "gateway.validation.failures";
 
     // t09-t12
-    /** Counter. Tags: result (queued/unchanged/indexed/stale_skipped/failed/dead/deleted). */
+    /**
+     * Counter. Tags: result: queued, unchanged, acl_updated (PUT outcomes), indexed, stale_skipped, retried, dead
+     * (worker outcomes), deleted (t11, D-51).
+     */
     public static final String INGEST_DOCUMENTS = "rag.ingest.documents";
-    /** Gauge. Outbox jobs currently dead. */
+    /** Gauge. Outbox jobs currently dead (refreshed by the worker after each poll, not on scrape; t11, D-51). */
     public static final String OUTBOX_DEAD = "rag.outbox.dead";
     /** Timer. Tags: mode (hybrid/vector/keyword). Whole retrieval: embedding, both legs, fusion. */
     public static final String RETRIEVAL_DURATION = "rag.retrieval.duration";

@@ -77,6 +77,9 @@ class RagQueryIT extends AbstractIntegrationTest {
     final HttpClient http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
 
     @Autowired
+    dev.raggateway.config.GatewayProperties properties;
+
+    @Autowired
     FakeRetriever retriever;
 
     @Autowired
@@ -281,6 +284,31 @@ class RagQueryIT extends AbstractIntegrationTest {
         assertThat(ragQueries(RagService.ANSWERED)).isEqualTo(2.0);
     }
 
+    /**
+     * The cache key holds the prompt, which holds the sources' text (D-40, D-49): after a re-index changes a chunk,
+     * the same question misses the cache and is answered from the new text, never from the stale cached answer.
+     */
+    @Test
+    void aReindexedSourceMissesTheCacheForTheSameQuestion() throws Exception {
+        retriever.returning(FakeRetriever.chunks(2));
+        claudeAnswers("Old fact [S1].");
+        HttpResponse<String> before = rag(key, query("What changed?"));
+
+        List<dev.raggateway.rag.RetrievedChunk> reindexed = new java.util.ArrayList<>(FakeRetriever.chunks(2));
+        var first = reindexed.getFirst();
+        reindexed.set(0, new dev.raggateway.rag.RetrievedChunk(first.chunkId(), first.docId(), first.title(),
+                first.ordinal(), "Fact number 1 about pods, corrected.", first.score(), first.keywordRank(),
+                first.vectorRank()));
+        retriever.returning(reindexed);
+        claudeAnswers("New fact [S1].");
+        HttpResponse<String> after = rag(key, query("What changed?"));
+
+        assertThat(before.headers().firstValue(GatewayHeaders.CACHE)).hasValue("MISS");
+        assertThat(after.headers().firstValue(GatewayHeaders.CACHE)).hasValue("MISS");
+        assertThat(JSON.readTree(after.body()).get("answer").asText()).isEqualTo("New fact [S1].");
+        assertThat(claudeCalls()).isEqualTo(2);
+    }
+
     @Test
     void cacheBypassHeaderAppliesToRagToo() throws Exception {
         retriever.returning(FakeRetriever.chunks(1));
@@ -418,17 +446,17 @@ class RagQueryIT extends AbstractIntegrationTest {
     }
 
     @Test
-    void aDatabaseFailureInRetrievalIs500WithTheGatewayErrorBodyAndNoDriverText() throws Exception {
+    void anUnreachableDatabaseInRetrievalIs503WithTheGatewayErrorBodyAndNoDriverText() throws Exception {
         retriever.failingWith(new org.springframework.dao.DataAccessResourceFailureException(
                 "Connection to db-host:5432 refused: SELECT secret FROM chunks"));
 
         HttpResponse<String> r = rag(key, query("q"));
 
-        assertThat(r.statusCode()).as(r.body()).isEqualTo(500);
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
         JsonNode body = JSON.readTree(r.body());
         assertThat(body.fieldNames()).toIterable().containsExactly("error");
-        assertThat(body.at("/error/code").asText()).isEqualTo("internal_error");
-        assertThat(body.at("/error/message").asText()).isEqualTo(RagService.RETRIEVAL_FAILED);
+        assertThat(body.at("/error/code").asText()).isEqualTo("service_unavailable");
+        assertThat(body.at("/error/message").asText()).isEqualTo(RagService.RETRIEVAL_UNAVAILABLE);
         assertThat(body.at("/error/request_id").asText()).isEqualTo(requestId(r).toString());
         assertThat(r.body()).doesNotContain("db-host").doesNotContain("SELECT").doesNotContain("Exception");
         assertThat(claudeCalls()).isZero();
@@ -479,30 +507,16 @@ class RagQueryIT extends AbstractIntegrationTest {
                 "chunk-1", "doc-1", "Title 1", "Fact number");
         Set<String> tenantsThatExist = new HashSet<>(CREATED_TENANTS);
         tenantsThatExist.addAll(jdbc.sql("SELECT id FROM tenants").query(String.class).list());
-        Map<String, Set<String>> bounded = Map.of(
-                "mode", Set.of("hybrid", "vector", "keyword"),
-                "leg", Set.of("keyword", "vector", "embed"),
-                "result", Set.of(RagService.ANSWERED, RagService.NO_SOURCES, RagService.ERROR));
-
         PrometheusScrape scrape = PrometheusScrape.fetch(baseUrl());
 
-        List<String> violations = new ArrayList<>();
-        for (PrometheusScrape.Sample s : scrape.samples()) {
-            if (!s.name().startsWith("rag_")) continue;
-            s.labels().forEach((label, value) -> {
-                if (!MetricNames.ALLOWED_LABELS.contains(label) && !"le".equals(label)) {
-                    violations.add(s.name() + ": label " + label + " is not allowed");
-                } else if (label.equals("tenant") && !tenantsThatExist.contains(value)) {
-                    violations.add(s.name() + ": tenant " + value + " does not exist");
-                } else if (bounded.containsKey(label) && !bounded.get(label).contains(value)) {
-                    violations.add(s.name() + ": " + label + "=" + value + " is not bounded");
-                }
-                for (String fragment : requestData) {
-                    if (value.contains(fragment)) violations.add(s.name() + ": " + label + " carries request data");
-                }
-            });
-        }
-        assertThat(violations).isEmpty();
+        // The application-wide label policy (AC-t04-3, D-38), which bounds mode and leg ...
+        var policy = new dev.raggateway.metrics.MetricLabelPolicy(properties.models().keySet(),
+                properties.providers().keySet(), tenantsThatExist, Set.copyOf(requestData));
+        assertThat(policy.violations(scrape)).isEmpty();
+        // ... and the RAG-specific bound on result, which other metrics use with other values.
+        Set<String> results = Set.of(RagService.ANSWERED, RagService.NO_SOURCES, RagService.ERROR);
+        assertThat(scrape.samples()).filteredOn(s -> s.name().startsWith("rag_") && s.labels().containsKey("result"))
+                .allSatisfy(s -> assertThat(results).contains(s.labels().get("result")));
         String queries = PrometheusScrape.prometheusBase(MetricNames.RAG_QUERIES) + "_total";
         assertThat(scrape.labelNames(queries::equals)).containsExactlyInAnyOrder("tenant", "result");
         assertThat(scrape.sum(queries, Map.of("tenant", tenant, "result", RagService.ANSWERED))).isEqualTo(1.0);

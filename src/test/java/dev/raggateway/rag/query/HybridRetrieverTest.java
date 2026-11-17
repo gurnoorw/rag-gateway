@@ -119,7 +119,7 @@ class HybridRetrieverTest {
 
         assertThatThrownBy(() -> retriever.retrieve(query(RetrievalMode.VECTOR, Set.of("eng"))))
                 .isInstanceOfSatisfying(GatewayException.class, e -> {
-                    assertThat(e.code()).isEqualTo(ErrorCode.ALL_PROVIDERS_FAILED);
+                    assertThat(e.code()).isEqualTo(ErrorCode.SERVICE_UNAVAILABLE);
                     assertThat(e.code().httpStatus()).isEqualTo(503);
                 });
         assertThat(repository.vectorCalls).hasValue(0);

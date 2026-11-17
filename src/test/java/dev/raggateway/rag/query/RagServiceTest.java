@@ -217,7 +217,7 @@ class RagServiceTest {
 
     @Test
     void aRetrievalFailureIsCountedAndPropagated() {
-        retriever.failingWith(new GatewayException(ErrorCode.ALL_PROVIDERS_FAILED, "embedder unavailable"));
+        retriever.failingWith(new GatewayException(ErrorCode.SERVICE_UNAVAILABLE, "embedder unavailable"));
 
         assertThatThrownBy(() -> service.answer(CALLER, question("q", RetrievalMode.VECTOR)))
                 .isInstanceOf(GatewayException.class);
@@ -226,9 +226,29 @@ class RagServiceTest {
     }
 
     @Test
-    void aDatabaseFailureInRetrievalBecomesAFixedInternalError() {
-        retriever.failingWith(new org.springframework.dao.DataAccessResourceFailureException(
-                "Connection to db-host:5432 refused: SELECT secret FROM chunks"));
+    void anUnavailableDatabaseInRetrievalBecomesAFixed503() {
+        for (RuntimeException e : List.of(
+                new org.springframework.dao.DataAccessResourceFailureException("Connection to db-host:5432 refused"),
+                new org.springframework.dao.QueryTimeoutException("SELECT secret FROM chunks timed out"),
+                new org.springframework.jdbc.CannotGetJdbcConnectionException("pool db-host timed out"),
+                new org.springframework.transaction.CannotCreateTransactionException("db-host: no connection"))) {
+            retriever.failingWith(e);
+            assertThatThrownBy(() -> service.answer(CALLER, question("q", RetrievalMode.HYBRID)))
+                    .as(e.getClass().getSimpleName())
+                    .isInstanceOfSatisfying(GatewayException.class, ge -> {
+                        assertThat(ge.code()).isEqualTo(ErrorCode.SERVICE_UNAVAILABLE);
+                        assertThat(ge.getMessage()).isEqualTo(RagService.RETRIEVAL_UNAVAILABLE)
+                                .doesNotContain("db-host").doesNotContain("SELECT");
+                    });
+        }
+        assertThat(contexts).isEmpty();
+        assertThat(queries(RagService.ERROR)).isEqualTo(4.0);
+    }
+
+    @Test
+    void anyOtherDatabaseErrorInRetrievalIsAFixedInternalError() {
+        retriever.failingWith(new org.springframework.jdbc.BadSqlGrammarException("vector", "SELECT secret",
+                new java.sql.SQLException("syntax error at db-host")));
 
         assertThatThrownBy(() -> service.answer(CALLER, question("q", RetrievalMode.HYBRID)))
                 .isInstanceOfSatisfying(GatewayException.class, e -> {
@@ -236,7 +256,6 @@ class RagServiceTest {
                     assertThat(e.getMessage()).isEqualTo(RagService.RETRIEVAL_FAILED)
                             .doesNotContain("db-host").doesNotContain("SELECT");
                 });
-        assertThat(contexts).isEmpty();
         assertThat(queries(RagService.ERROR)).isEqualTo(1.0);
     }
 

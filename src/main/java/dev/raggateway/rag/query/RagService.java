@@ -1,5 +1,8 @@
 package dev.raggateway.rag.query;
 
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.TransientDataAccessException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import dev.raggateway.api.GatewayHeaders;
 import dev.raggateway.api.dto.UsageDto;
 import dev.raggateway.core.ApiKeyPrincipal;
@@ -48,9 +51,10 @@ import java.util.function.LongSupplier;
  *       {@link CollectingSink}: auth was done at the edge; cache, rate limit and budget, routing, fallback,
  *       validation, the request log and metrics apply without new code. {@code temperature} 0 makes it
  *       cache-eligible (D-40).</li>
- *   <li><b>Retrieval errors</b>: a {@link GatewayException} (vector mode with the embedder down: 503) passes
- *       through; a database failure ({@link DataAccessException}) becomes 500 {@code internal_error} with a fixed
- *       message and no driver text, rendered in the gateway's error body like every other error.</li>
+ *   <li><b>Retrieval errors</b>: a {@link GatewayException} (vector mode with the embedder down: 503
+ *       {@code service_unavailable}) passes through. A database that is unreachable, out of pool connections or
+ *       timing out becomes 503 {@code service_unavailable}; any other {@link DataAccessException} (a bug) becomes
+ *       500 {@code internal_error}. Both have fixed messages and no driver text (D-50).</li>
  *   <li><b>Errors</b> from the pipeline are rethrown as the same {@link GatewayException} (code, message, headers
  *       such as {@code Retry-After}), so the HTTP edge renders the status and body chat would have.</li>
  * </ol>
@@ -73,6 +77,9 @@ public class RagService {
      * connection details, which stay out of the response and the log line (only exception class names are logged).
      */
     static final String RETRIEVAL_FAILED = "retrieval failed; try again";
+
+    /** Message of the 503 when the database cannot serve retrieval right now (D-50). */
+    static final String RETRIEVAL_UNAVAILABLE = "retrieval is temporarily unavailable; retry shortly";
 
     private final Retriever retriever;
     private final GatewayPipeline pipeline;
@@ -138,7 +145,14 @@ public class RagService {
         RetrievalResult retrieved;
         try {
             retrieved = retriever.retrieve(query);
+        } catch (DataAccessResourceFailureException | TransientDataAccessException | CannotCreateTransactionException e) {
+            // Unreachable database, pool timeout, query timeout: transient and retryable (D-50).
+            count(tenant, ERROR);
+            log.warn("rag query: result={} mode={} stage=retrieval error={} cause={}", ERROR, q.mode(),
+                    e.getClass().getSimpleName(), rootCauseName(e));
+            throw new GatewayException(ErrorCode.SERVICE_UNAVAILABLE, RETRIEVAL_UNAVAILABLE);
         } catch (DataAccessException e) {
+            // Anything else (bad SQL, a constraint) is our fault, not the caller's or the database's capacity.
             count(tenant, ERROR);
             log.warn("rag query: result={} mode={} stage=retrieval error={} cause={}", ERROR, q.mode(),
                     e.getClass().getSimpleName(), rootCauseName(e));

@@ -19,6 +19,12 @@ public enum ErrorCode {
     PROVIDER_ERROR(502, "api_error"),
     INVALID_MODEL_OUTPUT(502, "api_error"),
     ALL_PROVIDERS_FAILED(503, "api_error"),
+    /**
+     * A dependency this request needs is unreachable or out of capacity for now: the database during RAG retrieval
+     * (no connection, pool timeout, query timeout) or the embedding model in {@code vector} mode. Retryable; not a
+     * chat provider failure (that is {@link #ALL_PROVIDERS_FAILED}). t10 review, D-50.
+     */
+    SERVICE_UNAVAILABLE(503, "api_error"),
     /** This instance is at its in-flight request limit (load shedding, D-46); retry shortly or on another instance. */
     OVERLOADED(503, "api_error");
 

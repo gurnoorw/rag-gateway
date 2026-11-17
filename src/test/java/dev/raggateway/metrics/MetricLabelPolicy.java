@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
  *
  * <p>Returns violations rather than asserting, so {@code MetricLabelPolicyTest} can show that each rule fires.
  */
-final class MetricLabelPolicy {
+public final class MetricLabelPolicy {
 
     /** Prometheus adds this one to histogram buckets. Client-side percentiles ({@code quantile}) are not allowed. */
     static final String PROMETHEUS_LE = "le";
@@ -41,7 +41,7 @@ final class MetricLabelPolicy {
      * @param tenants             tenant ids that exist (the test's own)
      * @param forbiddenFragments  strings that came from requests and must appear in no label value
      */
-    MetricLabelPolicy(Set<String> catalogModels, Set<String> providers, Set<String> tenants,
+    public MetricLabelPolicy(Set<String> catalogModels, Set<String> providers, Set<String> tenants,
                       Set<String> forbiddenFragments) {
         Set<String> providerValues = union(providers, Set.of(MetricNames.PROVIDER_CACHE, MetricNames.PROVIDER_NONE));
         Set<String> codes = Arrays.stream(ErrorCode.values()).map(ErrorCode::code).collect(Collectors.toSet());
@@ -63,11 +63,11 @@ final class MetricLabelPolicy {
         this.forbiddenFragments = Set.copyOf(forbiddenFragments);
     }
 
-    static boolean inScope(String seriesName) {
+    public static boolean inScope(String seriesName) {
         return seriesName.startsWith("gateway_") || seriesName.startsWith("rag_");
     }
 
-    List<String> violations(PrometheusScrape scrape) {
+    public List<String> violations(PrometheusScrape scrape) {
         List<String> violations = new ArrayList<>();
         for (PrometheusScrape.Sample s : scrape.samples()) {
             if (!inScope(s.name())) continue;

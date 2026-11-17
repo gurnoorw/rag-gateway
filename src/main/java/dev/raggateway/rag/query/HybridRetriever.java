@@ -117,7 +117,7 @@ public class HybridRetriever implements Retriever, AutoCloseable {
         if (vectorLeg != null) {
             if (vectorLeg.embedFailure() != null) {
                 if (q.mode() == RetrievalMode.VECTOR) {
-                    throw new GatewayException(ErrorCode.ALL_PROVIDERS_FAILED,
+                    throw new GatewayException(ErrorCode.SERVICE_UNAVAILABLE,
                             "the embedding provider is unavailable; vector retrieval cannot run",
                             vectorLeg.embedFailure());
                 }

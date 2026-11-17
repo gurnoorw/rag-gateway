@@ -73,6 +73,8 @@ public final class MetricNames {
     public static final String RETRIEVAL_LEG_DURATION = "rag.retrieval.leg.duration";
     /** Distribution summary. Tags: leg (keyword/vector). Rows a leg returned; below the candidate count = under-fill. */
     public static final String RETRIEVAL_CANDIDATES = "rag.retrieval.candidates";
+    /** Counter. No tags. Vector legs whose HNSW pass came back short and were re-run exactly (D-49 amendment). */
+    public static final String RETRIEVAL_EXACT_FALLBACK = "rag.retrieval.vector.exact_fallback";
     /** Counter. Tags: tenant, result (answered/no_sources/error). One per {@code POST /v1/rag/query} (t10). */
     public static final String RAG_QUERIES = "rag.queries";
 

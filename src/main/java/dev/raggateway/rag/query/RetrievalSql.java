@@ -61,11 +61,32 @@ public final class RetrievalSql {
             """;
 
     /**
+     * Vector leg, exact: the same predicates and distance, ordered by {@code distance + 0} and then chunk id, which no
+     * index can serve, so Postgres reads the rows the filter matches (through the tenant/collection btree or the ACL
+     * GIN index) and sorts them. Run by the repository only when {@link #VECTOR} came back with fewer than
+     * {@code :limit} rows (D-49 amendment): an HNSW scan is approximate even with an iterative scan, which stops at
+     * {@code hnsw.max_scan_tuples} visited tuples or at {@code work_mem × hnsw.scan_mem_multiplier}, and cannot reach
+     * nodes the graph does not connect. The fallback costs one sort over the matching rows, which is small exactly
+     * when a selective filter caused the shortfall.
+     */
+    public static final String VECTOR_EXACT = """
+            SELECT c.chunk_id, c.doc_id, c.title, c.ordinal, c.text,
+                   c.embedding <=> CAST(:vector AS vector) AS distance
+              FROM chunks c
+             WHERE c.tenant_id = :tenant
+               AND c.collection_id = :collection
+               AND c.acl_groups && CAST(:groups AS text[])
+             ORDER BY (c.embedding <=> CAST(:vector AS vector)) + 0, c.chunk_id
+             LIMIT :limit
+            """;
+
+    /**
      * {@code SET LOCAL} statements to run first in the vector leg's transaction (D-49). pgvector applies the
      * filter after the HNSW scan, and its default {@code ef_search} of 40 caps a scan at 40 rows, so without these
      * the leg returns fewer than {@code candidates} rows, and with a selective tenant or ACL filter only a few
      * (measured in the t10 prep: 40 of 50 without a filter, 1 of 50 with a 4% filter; 50 with these settings).
-     * Values come from typed, validated config, never from a request.
+     * They raise the odds of a full list, not a guarantee: {@link #VECTOR_EXACT} covers the rest. Values come from
+     * typed, validated config, never from a request.
      */
     public static List<String> vectorSessionSettings(RagProperties.Retrieval r) {
         return List.of(

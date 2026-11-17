@@ -1,5 +1,7 @@
 package dev.raggateway.rag.query;
 
+import dev.raggateway.metrics.MetricNames;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.raggateway.rag.PgVector;
 import dev.raggateway.rag.RagProperties;
 import dev.raggateway.rag.ingest.FakeEmbedder;
@@ -122,26 +124,16 @@ class ChunkSearchRepositoryTest extends AbstractPostgresTest {
     }
 
     /**
-     * 1,560 chunks in one collection, 60 (~4%) in the caller's group: the shape D-49 measured. The planner on a
-     * table this small would read the matching rows and sort them exactly, which never under-fills; a session with
-     * {@code enable_sort} off (and no sequential scan) leaves the HNSW scan as the only ordered plan, as on a large
-     * table. That is set on this test's own connections, never by the repository.
+     * 1,560 chunks in one collection, 60 (~4%) in the caller's group, as dense clustered vectors
+     * ({@link RagFixtures#hnswUnderFillShape}; the fake embedder's sparse vectors build a poorly connected graph, the
+     * t10 flake, D-49 amendment). The planner on a table this small would read the matching rows and sort them
+     * exactly; a session with {@code enable_sort} off (and no sequential scan) leaves the HNSW scan as the only
+     * ordered plan, as on a large table. That is set on this test's own connections, never by the repository.
      */
     @Test
     void vectorLegUsesTheHnswIndexUnderASelectiveFilterAndReturnsTheFullCandidateCount() {
-        UUID noise = RagFixtures.document(jdbc, tenant, "mixed", "noise", "Noise", Set.of("eng"), EMBEDDER);
-        for (int i = 0; i < 1_500; i++) {
-            RagFixtures.chunk(jdbc, noise, tenant, "mixed", "noise", "Noise", i, "noise " + i, new String[]{"eng"},
-                    EMBEDDER.embedDocuments(List.of("scheduling pods onto nodes, copy " + i)).getFirst());
-        }
-        UUID rare = RagFixtures.document(jdbc, tenant, "mixed", "rare", "Rare", Set.of("rare"), EMBEDDER);
-        for (int i = 0; i < 60; i++) {
-            RagFixtures.chunk(jdbc, rare, tenant, "mixed", "rare", "Rare", i, "rare " + i, new String[]{"rare"},
-                    EMBEDDER.embedDocuments(List.of("unrelated words number " + i)).getFirst());
-        }
-        jdbc.sql("ANALYZE chunks").update();
+        float[] question = RagFixtures.hnswUnderFillShape(jdbc, tenant, "mixed", EMBEDDER);
         DataSource hnswOnly = hnswOnlyDataSource();
-        float[] question = EMBEDDER.embedQuery("scheduling pods");
 
         String plan = explainVector(hnswOnly, question, Set.of("rare"));
         List<Row> rows = repository(hnswOnly, RagProperties.Retrieval.defaults())
@@ -149,12 +141,38 @@ class ChunkSearchRepositoryTest extends AbstractPostgresTest {
 
         assertThat(plan).contains("Index Scan using chunks_embedding_hnsw").doesNotContain("Sort");
         assertThat(rows).hasSize(50).allMatch(r -> r.text().startsWith("rare "));
+    }
 
-        // Control: the same repository without the iterative scan under-fills on this plan, so the full list
-        // above comes from the settings the repository applies, not from an exact sort.
+    /**
+     * When the HNSW pass comes back short (here forced: no iterative scan, so ef_search 100 finds few of the 60), the
+     * repository re-runs the leg exactly and still returns the full list, in exact distance order, and counts it.
+     */
+    @Test
+    void aShortHnswPassFallsBackToTheExactLegAndIsCounted() {
+        float[] question = RagFixtures.hnswUnderFillShape(jdbc, tenant, "mixed", EMBEDDER);
+        var meters = new SimpleMeterRegistry();
         var noIterativeScan = new RagProperties.Retrieval(50, 60, 100, RagProperties.IterativeScan.OFF, 20_000);
-        assertThat(repository(hnswOnly, noIterativeScan).vector(tenant, "mixed", Set.of("rare"), question, 50))
-                .hasSizeLessThan(50);
+        DataSource hnswOnly = hnswOnlyDataSource();
+        var repo = new ChunkSearchRepository(JdbcClient.create(hnswOnly), new DataSourceTransactionManager(hnswOnly),
+                new RagProperties(null, null, 768, 20, null, null, 4, null, null, noIterativeScan, null), meters);
+
+        List<Row> rows = repo.vector(tenant, "mixed", Set.of("rare"), question, 50);
+
+        List<String> truth = jdbc.sql("""
+                        SELECT chunk_id::text FROM chunks
+                         WHERE tenant_id = :t AND collection_id = 'mixed' AND acl_groups && '{rare}'
+                         ORDER BY embedding <=> CAST(:q AS vector), chunk_id LIMIT 50""")
+                .param("t", tenant).param("q", PgVector.literal(question)).query(String.class).list();
+        assertThat(rows).extracting(Row::chunkId).containsExactlyElementsOf(truth);
+        assertThat(meters.counter(MetricNames.RETRIEVAL_EXACT_FALLBACK).count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void fewerMatchingRowsThanTheLimitReturnsThemAll() {
+        RagFixtures.document(jdbc, tenant, "k8s", "concepts.deployment", "Deployments", Set.of("eng"), EMBEDDER,
+                "Set maxSurge for rolling updates.", "Pause a rollout to batch changes.");
+        // 2 eng chunks exist for this tenant and collection: the exact re-run confirms there are no more.
+        assertThat(repository.vector(tenant, "k8s", Set.of("eng"), EMBEDDER.embedQuery("maxSurge"), 50)).hasSize(2);
     }
 
     static DataSource hnswOnlyDataSource() {

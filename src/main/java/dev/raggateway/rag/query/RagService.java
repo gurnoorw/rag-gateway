@@ -22,7 +22,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
@@ -48,6 +48,9 @@ import java.util.function.LongSupplier;
  *       {@link CollectingSink}: auth was done at the edge; cache, rate limit and budget, routing, fallback,
  *       validation, the request log and metrics apply without new code. {@code temperature} 0 makes it
  *       cache-eligible (D-40).</li>
+ *   <li><b>Retrieval errors</b>: a {@link GatewayException} (vector mode with the embedder down: 503) passes
+ *       through; a database failure ({@link DataAccessException}) becomes 500 {@code internal_error} with a fixed
+ *       message and no driver text, rendered in the gateway's error body like every other error.</li>
  *   <li><b>Errors</b> from the pipeline are rethrown as the same {@link GatewayException} (code, message, headers
  *       such as {@code Retry-After}), so the HTTP edge renders the status and body chat would have.</li>
  * </ol>
@@ -65,19 +68,20 @@ public class RagService {
     static final String NO_SOURCES = "no_sources";
     static final String ERROR = "error";
 
+    /**
+     * Message of the 500 for a database failure during retrieval. Fixed: the driver's message can hold SQL or
+     * connection details, which stay out of the response and the log line (only exception class names are logged).
+     */
+    static final String RETRIEVAL_FAILED = "retrieval failed; try again";
+
     private final Retriever retriever;
     private final GatewayPipeline pipeline;
     private final RagProperties.Answer settings;
     private final MeterRegistry registry;
     private final LongSupplier nanoClock;
 
-    /**
-     * {@code @Lazy} on the retriever: the hybrid retriever is built in parallel in the same round (Dev A), so on this
-     * branch alone the application has no {@link Retriever} bean. The proxy resolves it on first use; once the
-     * retriever is merged this annotation can go (B's final commit).
-     */
     @Autowired
-    public RagService(@Lazy Retriever retriever, GatewayPipeline pipeline, RagProperties properties,
+    public RagService(Retriever retriever, GatewayPipeline pipeline, RagProperties properties,
                       MeterRegistry registry) {
         this(retriever, pipeline, properties.answer(), registry, System::nanoTime);
     }
@@ -134,6 +138,11 @@ public class RagService {
         RetrievalResult retrieved;
         try {
             retrieved = retriever.retrieve(query);
+        } catch (DataAccessException e) {
+            count(tenant, ERROR);
+            log.warn("rag query: result={} mode={} stage=retrieval error={} cause={}", ERROR, q.mode(),
+                    e.getClass().getSimpleName(), rootCauseName(e));
+            throw new GatewayException(ErrorCode.INTERNAL_ERROR, RETRIEVAL_FAILED);
         } catch (RuntimeException e) {
             count(tenant, ERROR);
             log.info("rag query: result={} mode={} stage=retrieval error={}", ERROR, q.mode(), e.getClass().getSimpleName());
@@ -211,6 +220,12 @@ public class RagService {
 
     private void count(String tenant, String result) {
         registry.counter(MetricNames.RAG_QUERIES, "tenant", tenant, "result", result).increment();
+    }
+
+    private static String rootCauseName(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+        return root.getClass().getSimpleName();
     }
 
     static String wire(RetrievalMode mode) {

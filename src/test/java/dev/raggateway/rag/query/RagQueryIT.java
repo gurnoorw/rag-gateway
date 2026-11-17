@@ -418,6 +418,29 @@ class RagQueryIT extends AbstractIntegrationTest {
     }
 
     @Test
+    void aDatabaseFailureInRetrievalIs500WithTheGatewayErrorBodyAndNoDriverText() throws Exception {
+        retriever.failingWith(new org.springframework.dao.DataAccessResourceFailureException(
+                "Connection to db-host:5432 refused: SELECT secret FROM chunks"));
+
+        HttpResponse<String> r = rag(key, query("q"));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(500);
+        JsonNode body = JSON.readTree(r.body());
+        assertThat(body.fieldNames()).toIterable().containsExactly("error");
+        assertThat(body.at("/error/code").asText()).isEqualTo("internal_error");
+        assertThat(body.at("/error/message").asText()).isEqualTo(RagService.RETRIEVAL_FAILED);
+        assertThat(body.at("/error/request_id").asText()).isEqualTo(requestId(r).toString());
+        assertThat(r.body()).doesNotContain("db-host").doesNotContain("SELECT").doesNotContain("Exception");
+        assertThat(claudeCalls()).isZero();
+        assertThat(ragQueries(RagService.ERROR)).isEqualTo(1.0);
+    }
+
+    @Test
+    void theFakeRetrieverIsTheRetrieverInThisContext(@Autowired dev.raggateway.rag.Retriever bean) {
+        assertThat(bean).isSameAs(retriever);
+    }
+
+    @Test
     void anExhaustedProviderChainKeepsChatsStatusAndBody() throws Exception {
         retriever.returning(FakeRetriever.chunks(2));
         CLAUDE.stubFor(post("/v1/messages").willReturn(aResponse().withStatus(500)

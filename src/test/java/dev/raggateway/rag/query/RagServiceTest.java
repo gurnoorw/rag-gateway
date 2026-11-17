@@ -226,6 +226,21 @@ class RagServiceTest {
     }
 
     @Test
+    void aDatabaseFailureInRetrievalBecomesAFixedInternalError() {
+        retriever.failingWith(new org.springframework.dao.DataAccessResourceFailureException(
+                "Connection to db-host:5432 refused: SELECT secret FROM chunks"));
+
+        assertThatThrownBy(() -> service.answer(CALLER, question("q", RetrievalMode.HYBRID)))
+                .isInstanceOfSatisfying(GatewayException.class, e -> {
+                    assertThat(e.code()).isEqualTo(ErrorCode.INTERNAL_ERROR);
+                    assertThat(e.getMessage()).isEqualTo(RagService.RETRIEVAL_FAILED)
+                            .doesNotContain("db-host").doesNotContain("SELECT");
+                });
+        assertThat(contexts).isEmpty();
+        assertThat(queries(RagService.ERROR)).isEqualTo(1.0);
+    }
+
+    @Test
     void ragQueriesCarryOnlyTenantAndResult() {
         retriever.returning(FakeRetriever.chunks(1));
         service.answer(CALLER, question("q", RetrievalMode.HYBRID));

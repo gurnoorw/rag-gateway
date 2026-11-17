@@ -513,11 +513,12 @@ class RagQueryIT extends AbstractIntegrationTest {
         var policy = new dev.raggateway.metrics.MetricLabelPolicy(properties.models().keySet(),
                 properties.providers().keySet(), tenantsThatExist, Set.copyOf(requestData));
         assertThat(policy.violations(scrape)).isEmpty();
-        // ... and the RAG-specific bound on result, which other metrics use with other values.
+        // ... and the bound on rag.queries' result. Only that series: other rag metrics use result with their own
+        // values (rag.ingest.documents, t11).
         Set<String> results = Set.of(RagService.ANSWERED, RagService.NO_SOURCES, RagService.ERROR);
-        assertThat(scrape.samples()).filteredOn(s -> s.name().startsWith("rag_") && s.labels().containsKey("result"))
-                .allSatisfy(s -> assertThat(results).contains(s.labels().get("result")));
         String queries = PrometheusScrape.prometheusBase(MetricNames.RAG_QUERIES) + "_total";
+        assertThat(scrape.samples()).filteredOn(s -> s.name().equals(queries)).isNotEmpty()
+                .allSatisfy(s -> assertThat(results).contains(s.labels().get("result")));
         assertThat(scrape.labelNames(queries::equals)).containsExactlyInAnyOrder("tenant", "result");
         assertThat(scrape.sum(queries, Map.of("tenant", tenant, "result", RagService.ANSWERED))).isEqualTo(1.0);
         assertThat(scrape.sum(queries, Map.of("tenant", tenant, "result", RagService.NO_SOURCES))).isEqualTo(1.0);

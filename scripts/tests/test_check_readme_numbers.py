@@ -1,9 +1,10 @@
-"""Tests for scripts/check_readme_numbers.py (t08, AC-t08-2, -3, -4).
+"""Tests for scripts/check_readme_numbers.py (t08, AC-t08-2, -3, -4; t13 eval table, D-53, AC-t13-5).
 
 Run: python3 -m unittest discover -s scripts/tests -v
 
 Fixtures under scripts/tests/fixtures/ are test data, not a measurement: the summary file says so in
-``measured_on`` and no value in it was produced by a benchmark.
+``measured_on`` and no value in it was produced by a benchmark. The same holds for the eval results fixture under
+``fixtures/results/``.
 """
 import io
 import json
@@ -23,7 +24,9 @@ import check_readme_numbers as crn  # noqa: E402
 
 FIXTURES = HERE / "fixtures"
 SCHEMA = REPO / "bench/summary.schema.json"
+RESULTS_SCHEMA = REPO / "eval/results.schema.json"
 RUN_ID = "20261116T2130Z-test-data"
+EVAL_RUN = "20261117T0000Z-test-data"
 LABEL = "test data, not a measurement"
 
 
@@ -33,6 +36,8 @@ class CheckReadmeNumbersTest(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="crn-test-"))
         self.summary_dir = self.tmp / "summary"
         shutil.copytree(FIXTURES / "summary", self.summary_dir)
+        self.results_dir = self.tmp / "results"
+        shutil.copytree(FIXTURES / "results", self.results_dir)
         self.readme_text = (FIXTURES / "README.fixture.md").read_text(encoding="utf-8")
 
     def tearDown(self):
@@ -42,7 +47,8 @@ class CheckReadmeNumbersTest(unittest.TestCase):
         readme = self.tmp / "README.md"
         readme.write_text(self.readme_text if readme_text is None else readme_text, encoding="utf-8")
         out = io.StringIO()
-        code = crn.check(readme, self.summary_dir, SCHEMA, out=out)
+        code = crn.check(readme, self.summary_dir, SCHEMA, out=out, results_dir=self.results_dir,
+                         results_schema_path=RESULTS_SCHEMA)
         return code, out.getvalue()
 
     def replaced(self, old, new):
@@ -205,6 +211,107 @@ class CheckReadmeNumbersTest(unittest.TestCase):
     def test_fails_on_array_selector_that_matches_no_run(self):
         text = self.replaced("runs[n=1000]", "runs[n=4000]")
         self.assertFailsWith(text, "is not in " + RUN_ID)
+
+
+    # ------------------------------------------------------------ eval table (t13)
+
+    def eval_file(self, run=EVAL_RUN):
+        return self.results_dir / f"{run}.json"
+
+    def write_eval_variant(self, run, **changes):
+        data = json.loads(self.eval_file().read_text())
+        data["run_id"] = run
+        for key, value in changes.items():
+            data[key] = value
+        self.eval_file(run).write_text(json.dumps(data))
+        return data
+
+    def test_eval_fixture_passes_with_every_eval_unit(self):
+        code, out = self.run_check()
+        self.assertEqual(0, code, out)
+        self.assertIn("eval rows: 6, compared to a results file: 4, pending: 2", out)
+
+    def test_eval_fixture_results_file_is_valid_against_the_schema(self):
+        try:
+            import jsonschema
+        except ImportError:
+            self.skipTest("jsonschema not installed; the writer schema-checks real results files")
+        jsonschema.validate(json.loads(self.eval_file().read_text()), json.loads(RESULTS_SCHEMA.read_text()))
+
+    def test_eval_fails_on_mismatched_value(self):
+        text = self.replaced("| 0.429 | fraction |", "| 0.428 | fraction |")
+        self.assertFailsWith(text, "Value 0.428 fraction != 0.429 fraction")
+
+    def test_eval_fails_without_its_markers_or_with_the_wrong_header(self):
+        self.assertFailsWith(self.readme_text.replace("<!-- eval:begin -->", ""), "eval:begin")
+        text = self.replaced("| Metric | Value | Unit | Measured on | Embedder | Run | Source key |",
+                             "| Metric | Value | Unit | Measured on | Run | Source key |")
+        self.assertFailsWith(text, "eval table header must be")
+
+    def test_ac_t13_5_a_hybrid_value_from_a_keyword_only_file_fails(self):
+        row = ("| Recall@5, hybrid, 400 tokens | 0.500 | fraction | test data, not a measurement | nomic-embed-text "
+               f"| {EVAL_RUN} | `retrieval[mode=hybrid,chunk_target_tokens=400].recall_at_5` |")
+        text = self.replaced("| Recall@5, hybrid, 400 tokens | pending laptop run | fraction | test data, not a "
+                             "measurement | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=400]"
+                             ".recall_at_5` |", row)
+        self.assertFailsWith(text, "needs a nomic-embed-text results file", "Embedder 'nomic-embed-text' differs")
+
+    def test_ac_t13_5_a_hybrid_row_must_name_the_real_embedder_even_while_pending(self):
+        text = self.replaced("nomic-embed-text | | `retrieval[mode=hybrid", "none | | `retrieval[mode=hybrid")
+        self.assertFailsWith(text, "needs Embedder nomic-embed-text, got 'none'")
+
+    def test_ac_t13_5_the_fake_embedder_is_never_an_eval_embedder(self):
+        text = self.replaced("| 0.429 | fraction | test data, not a measurement | none |",
+                             "| 0.429 | fraction | test data, not a measurement | fake |")
+        self.assertFailsWith(text, "Embedder must be one of nomic-embed-text, none, got 'fake'")
+
+    def test_ac_t13_5_a_hybrid_value_from_a_real_embedder_file_passes(self):
+        data = json.loads(self.eval_file().read_text())
+        rows = data["retrieval"] + [dict(data["retrieval"][1], mode="hybrid", recall_at_5=0.75)]
+        self.write_eval_variant("20261117T0001Z-test-data-model", embedder={"kind": "nomic-embed-text"},
+                                retrieval=rows)
+        row = ("| Recall@5, hybrid, 400 tokens | 0.750 | fraction | test data, not a measurement | nomic-embed-text "
+               "| 20261117T0001Z-test-data-model | `retrieval[mode=hybrid,chunk_target_tokens=400].recall_at_5` |")
+        text = self.replaced("| Recall@5, hybrid, 400 tokens | pending laptop run | fraction | test data, not a "
+                             "measurement | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=400]"
+                             ".recall_at_5` |", row)
+        code, out = self.run_check(text)
+        self.assertEqual(0, code, out)
+
+    def test_ac_t13_5_an_answer_value_needs_a_judge_section(self):
+        self.write_eval_variant("20261117T0002Z-test-data-model", embedder={"kind": "nomic-embed-text"})
+        text = self.replaced("| Answers correct | pending laptop run | fraction | test data, not a measurement "
+                             "| nomic-embed-text | |",
+                             "| Answers correct | 0.500 | fraction | test data, not a measurement "
+                             "| nomic-embed-text | 20261117T0002Z-test-data-model |")
+        self.assertFailsWith(text, "needs an answers.judge section")
+
+    def test_ac_t13_5_an_acl_value_from_a_hybrid_acl_run_needs_the_real_embedder(self):
+        data = json.loads(self.eval_file().read_text())
+        self.write_eval_variant("20261117T0003Z-test-data", acl=dict(data["acl"], mode="hybrid"))
+        text = self.replaced(f"| 0 | chunks | test data, not a measurement | none | {EVAL_RUN} |",
+                             "| 0 | chunks | test data, not a measurement | none | 20261117T0003Z-test-data |")
+        self.assertFailsWith(text, "needs a nomic-embed-text results file")
+
+    def test_eval_fails_when_the_embedder_column_differs_from_the_file(self):
+        text = self.replaced("| 0.429 | fraction | test data, not a measurement | none |",
+                             "| 0.429 | fraction | test data, not a measurement | nomic-embed-text |")
+        self.assertFailsWith(text, "Embedder 'nomic-embed-text' differs")
+
+    def test_eval_fails_on_unknown_key_unit_and_missing_file(self):
+        self.assertFailsWith(self.replaced(".recall_at_5` |", ".recall_at_7` |"), "unknown source key")
+        self.assertFailsWith(self.replaced("| 0.429 | fraction |", "| 0.429 | ms |"), "unknown unit 'ms'")
+        self.assertFailsWith(self.replaced("| 6 | questions |", "| 6 | fraction |"), "unit 'fraction' does not fit")
+        self.eval_file().unlink()
+        self.assertFailsWith(None, "results file missing")
+
+    def test_selector_with_two_fields_picks_one_row(self):
+        parts = crn.parse_key("retrieval[mode=keyword,chunk_target_tokens=200].mrr")
+        data = json.loads(self.eval_file().read_text())
+        self.assertEqual(0.2135, crn.value_at(data, parts))
+        self.assertIsNone(crn.parse_key("retrieval[mode=keyword,,x=1].mrr"))
+        self.assertEqual("0.429", crn.expected_text(0.4285, "fraction", crn.EVAL_UNITS))
+        self.assertEqual("21.4", crn.expected_text(0.2135, "%", crn.EVAL_UNITS))
 
 
 if __name__ == "__main__":

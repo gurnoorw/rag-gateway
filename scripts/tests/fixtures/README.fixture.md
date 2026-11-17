@@ -27,3 +27,14 @@ Some prose with a figure: the timeout is 5 s and the cache TTL is 6 h.
 | Cache-hit p99 (k6 client-side) | pending | ms | test data, not a measurement | | `scenarios.cache_hit_latency.p99_ms` |
 | Log insert p99 (bucket edges 0.5, 1, 2, 5 ms) | pending laptop run | ms | test data, not a measurement | | `scenarios.log_insert.p99_ms` |
 <!-- measured:end -->
+
+<!-- eval:begin -->
+| Metric | Value | Unit | Measured on | Embedder | Run | Source key |
+|---|---|---|---|---|---|---|
+| Recall@5, keyword, 400 tokens | 0.429 | fraction | test data, not a measurement | none | 20261117T0000Z-test-data | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_5` |
+| MRR, keyword, 200 tokens | 21.4 | % | test data, not a measurement | none | 20261117T0000Z-test-data | `retrieval[mode=keyword,chunk_target_tokens=200].mrr` |
+| ACL leaked chunks, keyword, 400 tokens | 0 | chunks | test data, not a measurement | none | 20261117T0000Z-test-data | `acl.unauthorised_leaked_chunks` |
+| ACL questions | 6 | questions | test data, not a measurement | none | 20261117T0000Z-test-data | `acl.questions` |
+| Recall@5, hybrid, 400 tokens | pending laptop run | fraction | test data, not a measurement | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=400].recall_at_5` |
+| Answers correct | pending laptop run | fraction | test data, not a measurement | nomic-embed-text | | `answers.correct_fraction` |
+<!-- eval:end -->

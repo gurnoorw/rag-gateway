@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Holds the README's measured table to the committed benchmark run files (t08, D-45; AC-t08-2, -3, -4).
+"""Holds the README's measured tables to the committed run files (t08, D-45; t13, D-53).
 
     python3 scripts/check_readme_numbers.py
     python3 scripts/check_readme_numbers.py --readme README.md --summary-dir bench/summary \\
-        --schema bench/summary.schema.json
+        --schema bench/summary.schema.json --results-dir eval/results --results-schema eval/results.schema.json
 
 The measured table sits between ``<!-- measured:begin -->`` and ``<!-- measured:end -->`` and has the columns
 Metric | Value | Unit | Measured on | Run | Source key. For every row:
@@ -23,7 +23,20 @@ Metric | Value | Unit | Measured on | Run | Source key. For every row:
   - A row whose Metric names a percentile (p50/p95/p99) says where it came from: "k6 client-side" or
     "bucket edges" followed by the edges (D-38).
 
-"MacBook" may appear in the README only inside measured rows whose run file's ``measured_on`` says MacBook
+The eval table (t13, D-53) sits between ``<!-- eval:begin -->`` and ``<!-- eval:end -->`` and has the columns
+Metric | Value | Unit | Measured on | Embedder | Run | Source key. It is read from ``eval/results/<Run>.json`` and
+its keys are checked against ``eval/results.schema.json``; array items are selected by field values, e.g.
+``retrieval[mode=keyword,chunk_target_tokens=400].recall_at_5``. The rules above apply, plus:
+
+  - Units: ``fraction`` (a schema fraction shown to 3 decimals), ``%`` (a fraction x 100 to 1 decimal), and the
+    counts ``chunks`` and ``questions`` (integers, exactly).
+  - Embedder is ``none`` or ``nomic-embed-text`` (never the fake embedder) and equals the file's ``embedder.kind``.
+  - A vector, hybrid or answer row (``mode=vector``, ``mode=hybrid`` or ``generator_mode`` hybrid/vector in the key,
+    an ``answers.`` key, or an ``acl.`` key whose file says vector or hybrid) needs Embedder ``nomic-embed-text`` and a
+    file whose ``embedder.kind`` is ``nomic-embed-text``; an answer row also needs an ``answers.judge`` section. Until
+    such a file is committed those rows read ``pending laptop run`` with an empty Run (AC-t13-5).
+
+"MacBook" may appear in the README only inside measured or eval rows whose run file's ``measured_on`` says MacBook
 (AC-t08-3): a laptop label never appears without the laptop run behind it.
 
 It then lists every other number in the README outside the designed-for table (between
@@ -44,6 +57,10 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 MEASURED_BEGIN, MEASURED_END = "<!-- measured:begin -->", "<!-- measured:end -->"
 DESIGNED_BEGIN, DESIGNED_END = "<!-- designed-for:begin -->", "<!-- designed-for:end -->"
 COLUMNS = ["Metric", "Value", "Unit", "Measured on", "Run", "Source key"]
+EVAL_BEGIN, EVAL_END = "<!-- eval:begin -->", "<!-- eval:end -->"
+EVAL_COLUMNS = ["Metric", "Value", "Unit", "Measured on", "Embedder", "Run", "Source key"]
+EVAL_EMBEDDERS = {"none", "nomic-embed-text"}
+MODEL_EMBEDDER = "nomic-embed-text"
 PENDING = {"pending", "pending laptop run"}
 
 # unit -> (decimals, scale, rule). rule checks the key segments / schema node the unit may be used with.
@@ -57,10 +74,17 @@ UNITS = {
     "%": (1, 100, "fraction"),
     **{u: (0, 1, "integer") for u in COUNT_UNITS},
 }
+# The eval table's units: unit -> (decimals, scale, rule).
+EVAL_UNITS = {
+    "fraction": (3, 1, "fraction"),
+    "%": (1, 100, "fraction"),
+    "chunks": (0, 1, "integer"),
+    "questions": (0, 1, "integer"),
+}
 
 PERCENTILE = re.compile(r"\bp(50|95|99)\b")
 BUCKET_EDGES = re.compile(r"bucket edges\s+\d[\d.]*(\s*,\s*\d[\d.]*)+\s*(ms|s)\b")
-KEY_SEGMENT = re.compile(r"^([a-z0-9_]+)(?:\[(\d+|[a-z0-9_]+=[^\]]+)\])?$")
+KEY_SEGMENT = re.compile(r"^([a-z0-9_]+)(?:\[(\d+|[a-z0-9_]+=[^\],=]+(?:,[a-z0-9_]+=[^\],=]+)*)\])?$")
 # A number standing alone: not part of an identifier such as D-05, t08, v1, llama3.2:1b or a run id.
 NUMBER = re.compile(r"(?<![\w.\-/:])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[KMB](?!\w))?(?![\w\-:])")
 
@@ -122,10 +146,10 @@ def schema_leaf(schema, parts):
                 return None, None, f"'{name}' is not an array in the schema"
             node = node["items"]
             if index is not None and "=" in index:
-                field = index.split("=", 1)[0]
                 item = resolve_ref(schema, node)
-                if field not in item.get("properties", {}):
-                    return None, None, f"items of '{name}' have no field '{field}'"
+                for field, _ in selector(index):
+                    if field not in item.get("properties", {}):
+                        return None, None, f"items of '{name}' have no field '{field}'"
     if "$ref" in node:
         refs.append(node["$ref"])
     leaf = resolve_ref(schema, node)
@@ -134,8 +158,13 @@ def schema_leaf(schema, parts):
     return leaf, refs, None
 
 
-def unit_fits(unit, parts, leaf, refs):
-    rule = UNITS[unit][2]
+def selector(index):
+    """'mode=keyword,chunk_target_tokens=400' -> [('mode', 'keyword'), ('chunk_target_tokens', '400')]"""
+    return [tuple(pair.split("=", 1)) for pair in index.split(",")]
+
+
+def unit_fits(unit, parts, leaf, refs, units=UNITS):
+    rule = units[unit][2]
     names = [n for n, _ in parts]
     if rule.startswith("suffix:"):
         suffix = rule.split(":", 1)[1]
@@ -160,8 +189,8 @@ def value_at(data, parts):
         if not isinstance(node, list):
             return None
         if "=" in index:
-            field, want = index.split("=", 1)
-            match = [x for x in node if isinstance(x, dict) and str(x.get(field)) == want]
+            pairs = selector(index)
+            match = [x for x in node if isinstance(x, dict) and all(str(x.get(f)) == w for f, w in pairs)]
             if len(match) != 1:
                 return None
             node = match[0]
@@ -175,8 +204,8 @@ def value_at(data, parts):
     return node
 
 
-def expected_text(value, unit):
-    decimals, scale, _ = UNITS[unit]
+def expected_text(value, unit, units=UNITS):
+    decimals, scale, _ = units[unit]
     d = Decimal(repr(value)) * scale
     q = Decimal(1).scaleb(-decimals)
     return str(d.quantize(q, rounding=ROUND_HALF_UP))
@@ -216,8 +245,105 @@ def strip_code(cell):
     return cell[1:-1] if len(cell) >= 2 and cell.startswith("`") and cell.endswith("`") else cell
 
 
-def check(readme_path, summary_dir, schema_path, out=sys.stdout):
+def needs_model(key, data=None):
+    """True for a vector, hybrid or answer row: only a real-embedder results file may fill it (D-53)."""
+    if re.search(r"(?:^|[\[,])(?:mode|generator_mode)=(?:vector|hybrid)\b", key) or key.startswith("answers."):
+        return True
+    if key.startswith("acl.") and data is not None:
+        return data.get("acl", {}).get("mode") in ("vector", "hybrid")
+    return False
+
+
+def check_eval(lines, results_dir, schema, failures, checked_value_lines, macbook_ok_lines, row_lines):
+    """The eval table (t13). Returns (rows, rows compared to a results file)."""
+    span = section(lines, EVAL_BEGIN, EVAL_END)
+    if span is None:
+        failures.add("README", f"needs exactly one {EVAL_BEGIN} ... {EVAL_END} section")
+        return 0, 0
+    first, last = span
+    table = [(i, split_row(lines[i])) for i in range(first, last + 1) if lines[i].strip()]
+    if len(table) < 2 or table[0][1] != EVAL_COLUMNS:
+        failures.add(f"line {first + 1}", f"eval table header must be | {' | '.join(EVAL_COLUMNS)} |")
+        return 0, 0
+    rows = compared = 0
+    cache = {}
+    for i, cells in table[2:]:
+        where = f"line {i + 1}"
+        if cells is None or len(cells) != len(EVAL_COLUMNS):
+            failures.add(where, f"not a {len(EVAL_COLUMNS)}-column table row")
+            continue
+        rows += 1
+        row_lines.add(i)
+        metric, value, unit, measured_on, embedder, run, key = cells
+        key, run, embedder = strip_code(key), strip_code(run), strip_code(embedder)
+        if not measured_on:
+            failures.add(where, "empty Measured on")
+        if embedder not in EVAL_EMBEDDERS:
+            failures.add(where, f"Embedder must be one of {', '.join(sorted(EVAL_EMBEDDERS))}, got '{embedder}'")
+        if unit not in EVAL_UNITS:
+            failures.add(where, f"unknown unit '{unit}' (allowed: {', '.join(sorted(EVAL_UNITS))})")
+            continue
+        parts = parse_key(key)
+        if parts is None:
+            failures.add(where, f"malformed source key '{key}'")
+            continue
+        leaf, refs, why = schema_leaf(schema, parts)
+        if leaf is None:
+            failures.add(where, f"unknown source key '{key}': {why}")
+            continue
+        if not unit_fits(unit, parts, leaf, refs, EVAL_UNITS):
+            failures.add(where, f"unit '{unit}' does not fit source key '{key}'")
+        if needs_model(key) and embedder != MODEL_EMBEDDER:
+            failures.add(where, f"a vector, hybrid or answer row needs Embedder {MODEL_EMBEDDER}, got '{embedder}'")
+
+        if value in PENDING:
+            if run:
+                failures.add(where, f"'{value}' row must have an empty Run, got '{run}'")
+            continue
+        if not run:
+            failures.add(where, "a measured value needs a Run")
+            continue
+        run_file = results_dir / f"{run}.json"
+        if run not in cache:
+            cache[run] = load_json(run_file) if run_file.is_file() else None
+        data = cache[run]
+        if data is None:
+            failures.add(where, f"results file missing: {run_file}")
+            continue
+        if data.get("run_id") != run:
+            failures.add(where, f"{run_file.name} has run_id '{data.get('run_id')}', not '{run}'")
+        label = data.get("measured_on", "")
+        if measured_on != label:
+            failures.add(where, f"Measured on '{measured_on}' differs from {run_file.name}: '{label}'")
+        if "MacBook" in label:
+            macbook_ok_lines.add(i)
+        kind = data.get("embedder", {}).get("kind")
+        if kind != embedder:
+            failures.add(where, f"Embedder '{embedder}' differs from {run_file.name}: '{kind}'")
+        if needs_model(key, data) and kind != MODEL_EMBEDDER:
+            failures.add(where, f"a vector, hybrid or answer value needs a {MODEL_EMBEDDER} results file; "
+                                f"{run_file.name} has embedder '{kind}'")
+        if key.startswith("answers.") and "judge" not in data.get("answers", {}):
+            failures.add(where, f"an answer value needs an answers.judge section in {run_file.name}")
+        actual = value_at(data, parts)
+        if actual is None:
+            failures.add(where, f"source key '{key}' is not in {run_file.name}")
+            continue
+        got = readme_value(value)
+        want = expected_text(actual, unit, EVAL_UNITS)
+        checked_value_lines.add(i)
+        compared += 1
+        if got is None:
+            failures.add(where, f"Value '{value}' is not a number")
+        elif got != want:
+            failures.add(where, f"Value {value} {unit} != {want} {unit} ({key} = {actual} in {run_file.name})")
+    return rows, compared
+
+
+def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=None, results_schema_path=None):
     failures = Failures()
+    results_dir = pathlib.Path(results_dir) if results_dir else REPO / "eval/results"
+    results_schema_path = results_schema_path or REPO / "eval/results.schema.json"
     readme_path = pathlib.Path(readme_path)
     summary_dir = pathlib.Path(summary_dir)
     lines = readme_path.read_text(encoding="utf-8").splitlines()
@@ -313,6 +439,9 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout):
                 failures.add(where, f"Value {value} {unit} != {want} {unit} "
                                     f"({key} = {actual} in {run_file.name})")
 
+    eval_rows, eval_checked = check_eval(lines, results_dir, load_json(results_schema_path), failures,
+                                         checked_value_lines, macbook_ok_lines, measured_rows)
+
     for i, line in enumerate(lines):
         if "MacBook" in line and i not in macbook_ok_lines:
             failures.add(f"line {i + 1}", "'MacBook' outside a measured row whose run file says MacBook")
@@ -338,8 +467,11 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout):
             others.append((i + 1, "code" if in_code else "text", found, line.strip()))
 
     print(f"README: {readme_path}", file=out)
-    print(f"measured rows: {rows}, compared to a run file: {len(checked_value_lines)}, "
-          f"pending: {rows - len(checked_value_lines)}", file=out)
+    measured_checked = len(checked_value_lines) - eval_checked
+    print(f"measured rows: {rows}, compared to a run file: {measured_checked}, "
+          f"pending: {rows - measured_checked}", file=out)
+    print(f"eval rows: {eval_rows}, compared to a results file: {eval_checked}, "
+          f"pending: {eval_rows - eval_checked}", file=out)
     print("", file=out)
     print("Other numbers in the README (outside the designed-for table and the checked values), "
           "for the reviewer (AC-t08-4):", file=out)
@@ -352,8 +484,9 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout):
         for f in failures.items:
             print(f"  {f}", file=out)
         return 1
-    print(f"OK: {len(checked_value_lines)} measured value(s) match their run files; "
-          f"{rows - len(checked_value_lines)} row(s) pending, with valid keys and labels", file=out)
+    print(f"OK: {measured_checked} measured value(s) match their run files; "
+          f"{rows - measured_checked} row(s) pending, with valid keys and labels; "
+          f"{eval_checked} eval value(s) match their results files, {eval_rows - eval_checked} pending", file=out)
     return 0
 
 
@@ -362,12 +495,15 @@ def main(argv=None):
     parser.add_argument("--readme", default=str(REPO / "README.md"))
     parser.add_argument("--summary-dir", default=str(REPO / "bench/summary"))
     parser.add_argument("--schema", default=str(REPO / "bench/summary.schema.json"))
+    parser.add_argument("--results-dir", default=str(REPO / "eval/results"))
+    parser.add_argument("--results-schema", default=str(REPO / "eval/results.schema.json"))
     args = parser.parse_args(argv)
-    for p in (args.readme, args.schema):
+    for p in (args.readme, args.schema, args.results_schema):
         if not pathlib.Path(p).is_file():
             print(f"missing file: {p}", file=sys.stderr)
             return 2
-    return check(args.readme, args.summary_dir, args.schema)
+    return check(args.readme, args.summary_dir, args.schema, results_dir=args.results_dir,
+                 results_schema_path=args.results_schema)
 
 
 if __name__ == "__main__":

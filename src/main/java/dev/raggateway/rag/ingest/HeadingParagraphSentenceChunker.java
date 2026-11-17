@@ -20,7 +20,9 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li><b>Sections.</b> An ATX heading ({@code #} to {@code ######}) outside a code fence always starts a new
  *       chunk, and the first chunk of a section begins with its heading line. A heading with no text before the
- *       next heading is carried into the next section's first chunk, so no chunk is a bare heading.</li>
+ *       next heading is carried into the next section's first chunk, so no chunk is a bare heading, while the
+ *       carried headings stay within a quarter of {@code maxTokens}; a longer run of bare headings becomes a chunk
+ *       of its own, and a single heading line longer than that is packed and split like body text.</li>
  *   <li><b>Blocks.</b> Paragraphs are separated by blank lines; a fenced code block is one block. A block that
  *       fits in the current chunk joins it; one that does not, but fits in a chunk on its own, starts the next
  *       chunk whole; only a block larger than that is split into its units.</li>
@@ -74,6 +76,14 @@ public final class HeadingParagraphSentenceChunker implements Chunker {
         List<ChunkText> out = new ArrayList<>();
         for (Section section : sections(text)) new Packer(text, out).pack(section);
         return out;
+    }
+
+    /**
+     * Largest heading (or run of bare headings carried together) that leads a chunk: a quarter of the maximum, so
+     * the body always has most of the chunk and no heading run can push a chunk over the maximum.
+     */
+    private int headingCarryTokens() {
+        return Math.max(1, maxTokens / 4);
     }
 
     // ---- parsing ----------------------------------------------------------------------------------------------
@@ -131,9 +141,12 @@ public final class HeadingParagraphSentenceChunker implements Chunker {
             if (HEADING.matcher(line).find()) {
                 if (paraStart >= 0) blocks.add(paragraph(text, paraStart, paraEnd));
                 paraStart = -1;
-                if (heading != null && blocks.isEmpty()) {
-                    if (pendingHeadingStart < 0) pendingHeadingStart = heading.start();
+                int carryStart = pendingHeadingStart >= 0 ? pendingHeadingStart : heading == null ? -1 : heading.start();
+                if (heading != null && blocks.isEmpty()
+                        && estimator.estimate(text.substring(carryStart, trimEnd(text, pos, eol))) <= headingCarryTokens()) {
+                    pendingHeadingStart = carryStart;
                 } else if (heading != null || !blocks.isEmpty()) {
+                    // Also a run of bare headings too long to carry: it becomes a chunk of its own.
                     sections.add(section(heading, blocks, pendingHeadingStart));
                     pendingHeadingStart = -1;
                 }
@@ -335,7 +348,16 @@ public final class HeadingParagraphSentenceChunker implements Chunker {
         }
 
         void pack(Section section) {
-            if (section.heading() != null) current.add(section.heading());
+            Unit heading = section.heading();
+            if (heading != null && estimate(heading.start(), heading.end()) <= headingCarryTokens()) {
+                current.add(heading);
+            } else if (heading != null) {
+                // A heading line too long to lead a chunk is packed like body text, split to the maximum.
+                List<Unit> parts = new ArrayList<>();
+                HeadingParagraphSentenceChunker.this.addUnit(text, parts, heading.start(), heading.end(), Kind.FRAGMENT,
+                        maxTokens);
+                for (Unit part : parts) addUnit(part);
+            }
             for (Block block : section.blocks()) {
                 if (size(spanStart(block.start()), block.end()) <= targetTokens) {
                     current.addAll(block.units());

@@ -221,4 +221,30 @@ class HeadingParagraphSentenceChunkerTest {
         }
         return "";
     }
+
+    // ---- t09 review: bounded inputs for a 1 MB document (D-47 heap bound) ----
+
+    @Test
+    void aLongRunOfBareHeadingsNeverMakesAChunkAboveTheMaximum() {
+        String doc = "# h\n".repeat(20_000) + "\nThe body.";
+        List<ChunkText> out = chunker.split("t", doc);
+        assertThat(out).allSatisfy(c -> assertThat(c.estimatedTokens()).isLessThanOrEqualTo(MAX));
+        assertThat(out.getLast().text()).endsWith("The body.");
+    }
+
+    @Test
+    void aHeadingLineLongerThanTheMaximumIsSplitLikeBodyText() {
+        String doc = "# " + "word ".repeat(2_000) + "\n\nThe body.";
+        List<ChunkText> out = chunker.split("t", doc);
+        assertThat(out).hasSizeGreaterThan(1)
+                .allSatisfy(c -> assertThat(c.estimatedTokens()).isLessThanOrEqualTo(MAX));
+    }
+
+    @Test
+    void aOneMegabyteDocumentWithoutBreaksIsChunkedWithinTheMaximum() {
+        for (String doc : List.of("x".repeat(1_000_000), "word ".repeat(200_000), "- item\n".repeat(140_000))) {
+            List<ChunkText> out = chunker.split("t", doc);
+            assertThat(out).allSatisfy(c -> assertThat(c.estimatedTokens()).isLessThanOrEqualTo(MAX));
+        }
+    }
 }

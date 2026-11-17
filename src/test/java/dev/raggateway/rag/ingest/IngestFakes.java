@@ -38,6 +38,13 @@ final class IngestFakes {
 
     enum JobStatus { PENDING, IN_PROGRESS, DONE, DEAD }
 
+    /** The fake database clock for leases and retry times; tests move it instead of sleeping. */
+    volatile Instant now = Instant.parse("2026-01-01T00:00:00Z");
+
+    void advance(Duration d) {
+        now = now.plus(d);
+    }
+
     static final class Job {
         final UUID id = UUID.randomUUID();
         final UUID documentId;
@@ -45,6 +52,7 @@ final class IngestFakes {
         volatile JobStatus status = JobStatus.PENDING;
         volatile int attempts;
         volatile String lastError;
+        volatile Instant leaseUntil;
 
         Job(UUID documentId, String contentHash) {
             this.documentId = documentId;
@@ -52,10 +60,12 @@ final class IngestFakes {
         }
     }
 
+    /** Same rules as {@link JdbcOutboxStore}: retry time in the lease, fenced terminal calls. */
     final class Outbox implements OutboxStore {
         final Map<UUID, Job> jobs = Collections.synchronizedMap(new LinkedHashMap<>());
         final List<Integer> claimMax = new CopyOnWriteArrayList<>();
         final List<Duration> claimLease = new CopyOnWriteArrayList<>();
+        final List<Duration> retries = new CopyOnWriteArrayList<>();
 
         @Override
         public UUID insert(UUID documentId, String contentHash) {
@@ -69,11 +79,15 @@ final class IngestFakes {
             claimMax.add(max);
             claimLease.add(lease);
             List<OutboxEvent> claimed = new ArrayList<>();
+            Instant t = now;
             synchronized (jobs) {
                 for (Job job : jobs.values()) {
                     if (claimed.size() == max) break;
-                    if (job.status != JobStatus.PENDING) continue;
+                    boolean due = job.status == JobStatus.PENDING && (job.leaseUntil == null || !job.leaseUntil.isAfter(t));
+                    boolean expired = job.status == JobStatus.IN_PROGRESS && job.leaseUntil.isBefore(t);
+                    if (!due && !expired) continue;
                     job.status = JobStatus.IN_PROGRESS;
+                    job.leaseUntil = t.plus(lease);
                     job.attempts++;
                     claimed.add(new OutboxEvent(job.id, job.documentId, job.contentHash, job.attempts));
                 }
@@ -82,26 +96,60 @@ final class IngestFakes {
             return claimed;
         }
 
+        private synchronized Job owned(UUID id, int attempt) {
+            Job job = jobs.get(id);
+            return job != null && job.attempts == attempt && job.status == JobStatus.IN_PROGRESS ? job : null;
+        }
+
         @Override
-        public void markDone(UUID id) {
+        public synchronized boolean markDone(UUID id, int attempt) {
             events.add("done " + id);
-            Job job = jobs.get(id);
-            if (job != null) job.status = JobStatus.DONE;
+            Job job = owned(id, attempt);
+            if (job == null) return false;
+            job.status = JobStatus.DONE;
+            job.leaseUntil = null;
+            return true;
         }
 
         @Override
-        public void release(UUID id, String error) {
+        public synchronized boolean release(UUID id, int attempt, String error, Duration retryAfter) {
             events.add("release " + id);
-            Job job = jobs.get(id);
+            Job job = owned(id, attempt);
+            if (job == null) return false;
+            retries.add(retryAfter);
             job.status = JobStatus.PENDING;
+            job.leaseUntil = now.plus(retryAfter);
             job.lastError = error;
+            return true;
         }
 
         @Override
-        public void markDead(UUID id, String error) {
-            Job job = jobs.get(id);
+        public synchronized DeadLetter markDead(UUID id, int attempt, String error) {
+            events.add("dead " + id);
+            Job job = owned(id, attempt);
+            if (job == null) return new DeadLetter(false, false);
             job.status = JobStatus.DEAD;
+            job.leaseUntil = null;
             job.lastError = error;
+            IndexedDocument doc = documents.rows.get(job.documentId);
+            boolean fail = doc != null && doc.contentHash().equals(job.contentHash) && doc.status() == DocumentStatus.QUEUED;
+            if (fail) documents.rows.put(doc.id(), with(doc, DocumentStatus.FAILED, doc.chunkCount()));
+            return new DeadLetter(true, fail);
+        }
+
+        @Override
+        public long countUnresolvedDead() {
+            synchronized (jobs) {
+                List<Job> all = List.copyOf(jobs.values());   // insertion order = creation order
+                long n = 0;
+                for (int i = 0; i < all.size(); i++) {
+                    Job j = all.get(i);
+                    if (j.status != JobStatus.DEAD) continue;
+                    boolean newer = all.subList(i + 1, all.size()).stream().anyMatch(o -> o.documentId.equals(j.documentId));
+                    if (!newer) n++;
+                }
+                return n;
+            }
         }
 
         Job job(UUID id) {
@@ -111,6 +159,12 @@ final class IngestFakes {
         Job jobFor(UUID documentId) {
             synchronized (jobs) {
                 return jobs.values().stream().filter(j -> j.documentId.equals(documentId)).findFirst().orElseThrow();
+            }
+        }
+
+        List<Job> jobsFor(UUID documentId) {
+            synchronized (jobs) {
+                return jobs.values().stream().filter(j -> j.documentId.equals(documentId)).toList();
             }
         }
     }
@@ -140,8 +194,30 @@ final class IngestFakes {
         }
 
         @Override
-        public void markFailed(UUID id) {
-            rows.computeIfPresent(id, (k, r) -> with(r, DocumentStatus.FAILED, r.chunkCount()));
+        public Optional<IndexedDocument> lockForUpdate(String tenantId, String collection, String docId) {
+            return find(tenantId, collection, docId);
+        }
+
+        @Override
+        public int updateAcl(UUID id, java.util.Set<String> aclGroups, String contentHash) {
+            IndexedDocument r = rows.get(id);
+            rows.put(id, new IndexedDocument(r.id(), r.tenantId(), r.collection(), r.docId(), r.title(), r.content(),
+                    aclGroups, contentHash, r.status(), r.chunkCount(), r.updatedAt()));
+            List<ChunkRow> old = chunks.byDocument.getOrDefault(id, List.of());
+            chunks.byDocument.put(id, old.stream().map(c -> new ChunkRow(c.documentId(), c.tenantId(), c.collection(),
+                    c.docId(), c.title(), c.ordinal(), c.text(), c.embedding(), aclGroups)).toList());
+            return old.size();
+        }
+
+        @Override
+        public boolean delete(String tenantId, String collection, String docId) {
+            Optional<IndexedDocument> d = find(tenantId, collection, docId);
+            d.ifPresent(r -> {
+                rows.remove(r.id());
+                chunks.byDocument.remove(r.id());
+                outbox.jobs.values().removeIf(j -> j.documentId.equals(r.id()));
+            });
+            return d.isPresent();
         }
 
         IndexedDocument get(UUID id) {

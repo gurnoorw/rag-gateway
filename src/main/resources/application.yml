@@ -136,6 +136,11 @@ gateway:
       poll-delay: 1s             # fixed delay: polls never overlap
       claim-batch: 4
       lease: 5m
+      # Retries (t11, D-51): a failed job waits retry-base x 2^(attempts-1), at most retry-max (30s, 1m, 2m, 4m),
+      # and is dead after max-attempts (~7.5 min in all); the document is then 'failed' and a re-PUT queues it again.
+      max-attempts: 5
+      retry-base: 30s
+      retry-max: 10m
   # Gateway-specific variable names (D-32): ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY are also read by other
   # tools on the same machine, which could silently point the gateway at another host or account.
   providers:

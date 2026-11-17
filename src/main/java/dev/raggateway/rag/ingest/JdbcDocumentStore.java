@@ -19,6 +19,10 @@ import java.util.UUID;
  * <p>The upsert is one {@code INSERT .. ON CONFLICT (tenant_id, collection_id, doc_id) DO UPDATE}: no read
  * before the write, so two concurrent PUTs to the same address cannot both insert (the unique key decides) and
  * the surrogate id and chunk count of an existing row are kept.
+ *
+ * <p>t11 (D-51): {@link #lockForUpdate} lets the PUT decide its outcome under the row lock; {@link #updateAcl}
+ * is the ACL fast path (document and chunk groups in the caller's transaction); {@link #delete} is one statement
+ * whose cascade removes the chunks and jobs.
  */
 @Repository
 public class JdbcDocumentStore implements DocumentStore {
@@ -76,8 +80,46 @@ public class JdbcDocumentStore implements DocumentStore {
     }
 
     @Override
-    public void markFailed(UUID id) {
-        jdbc.sql("UPDATE documents SET status = 'failed', updated_at = now() WHERE id = :id").param("id", id).update();
+    public Optional<IndexedDocument> lockForUpdate(String tenantId, String collection, String docId) {
+        return jdbc.sql("SELECT " + COLUMNS + """
+                         FROM documents
+                        WHERE tenant_id = :tenant AND collection_id = :collection AND doc_id = :docId
+                        FOR UPDATE
+                        """)
+                .param("tenant", tenantId)
+                .param("collection", collection)
+                .param("docId", docId)
+                .query((rs, n) -> map(rs))
+                .optional();
+    }
+
+    @Override
+    public int updateAcl(UUID id, Set<String> aclGroups, String contentHash) {
+        String[] groups = aclGroups.stream().sorted().toArray(String[]::new);
+        jdbc.sql("""
+                        UPDATE documents SET acl_groups = CAST(:groups AS text[]), content_hash = :hash, updated_at = now()
+                        WHERE id = :id
+                        """)
+                .param("groups", groups)
+                .param("hash", contentHash)
+                .param("id", id)
+                .update();
+        return jdbc.sql("UPDATE chunks SET acl_groups = CAST(:groups AS text[]) WHERE document_id = :id")
+                .param("groups", groups)
+                .param("id", id)
+                .update();
+    }
+
+    @Override
+    public boolean delete(String tenantId, String collection, String docId) {
+        return jdbc.sql("""
+                        DELETE FROM documents
+                        WHERE tenant_id = :tenant AND collection_id = :collection AND doc_id = :docId
+                        """)
+                .param("tenant", tenantId)
+                .param("collection", collection)
+                .param("docId", docId)
+                .update() == 1;
     }
 
     private static IndexedDocument map(ResultSet rs) throws SQLException {

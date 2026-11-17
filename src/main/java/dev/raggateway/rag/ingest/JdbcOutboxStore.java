@@ -2,11 +2,14 @@ package dev.raggateway.rag.ingest;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -20,7 +23,13 @@ import java.util.UUID;
  * same job. A crashed worker's jobs come back when their lease runs out. Outside a Spring transaction the statement
  * is its own short transaction (autocommit), as the contract asks; the lock lasts only that statement.
  *
- * <p>{@code now()} is the database clock, so all instances share one clock for leases.
+ * <p>t11 (D-51): a released job stays PENDING with {@code lease_until} as its retry time, and the claim skips it
+ * until then. {@code markDone}, {@code release} and {@code markDead} are fenced by the attempt number the claim
+ * returned ({@code WHERE id = ? AND attempts = ? AND status = 'IN_PROGRESS'}), so a worker whose lease ran out and
+ * whose job was claimed again changes nothing. The claim predicate still only reads PENDING and IN_PROGRESS rows,
+ * so it keeps using the partial index {@code outbox_claimable}.
+ *
+ * <p>{@code now()} is the database clock, so all instances share one clock for leases and retry times.
  */
 @Repository
 public class JdbcOutboxStore implements OutboxStore {
@@ -29,9 +38,11 @@ public class JdbcOutboxStore implements OutboxStore {
     static final int MAX_ERROR_CHARS = 2_000;
 
     private final JdbcClient jdbc;
+    private final TransactionTemplate tx;
 
-    public JdbcOutboxStore(JdbcClient jdbc) {
+    public JdbcOutboxStore(JdbcClient jdbc, PlatformTransactionManager transactions) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc");
+        this.tx = new TransactionTemplate(Objects.requireNonNull(transactions, "transactions"));
     }
 
     @Override
@@ -57,7 +68,8 @@ public class JdbcOutboxStore implements OutboxStore {
                                           attempts = attempts + 1
                         WHERE id IN (
                           SELECT id FROM outbox
-                          WHERE status = 'PENDING' OR (status = 'IN_PROGRESS' AND lease_until < now())
+                          WHERE (status = 'PENDING' AND (lease_until IS NULL OR lease_until <= now()))
+                             OR (status = 'IN_PROGRESS' AND lease_until < now())
                           ORDER BY created_at
                           LIMIT :max
                           FOR UPDATE SKIP LOCKED
@@ -76,24 +88,76 @@ public class JdbcOutboxStore implements OutboxStore {
     }
 
     @Override
-    public void markDone(UUID id) {
-        jdbc.sql("UPDATE outbox SET status = 'DONE', lease_until = NULL WHERE id = :id").param("id", id).update();
+    public boolean markDone(UUID id, int attempt) {
+        return jdbc.sql("""
+                        UPDATE outbox SET status = 'DONE', lease_until = NULL
+                        WHERE id = :id AND attempts = :attempt AND status = 'IN_PROGRESS'
+                        """)
+                .param("id", id)
+                .param("attempt", attempt)
+                .update() == 1;
     }
 
     @Override
-    public void release(UUID id, String error) {
-        jdbc.sql("UPDATE outbox SET status = 'PENDING', lease_until = NULL, last_error = :error WHERE id = :id")
+    public boolean release(UUID id, int attempt, String error, Duration retryAfter) {
+        if (retryAfter == null || retryAfter.isNegative()) throw new IllegalArgumentException("retryAfter must be >= 0");
+        return jdbc.sql("""
+                        UPDATE outbox SET status = 'PENDING',
+                                          lease_until = now() + :retryMs * interval '1 millisecond',
+                                          last_error = :error
+                        WHERE id = :id AND attempts = :attempt AND status = 'IN_PROGRESS'
+                        """)
                 .param("id", id)
+                .param("attempt", attempt)
+                .param("retryMs", retryAfter.toMillis())
                 .param("error", truncate(error))
-                .update();
+                .update() == 1;
     }
 
     @Override
-    public void markDead(UUID id, String error) {
-        jdbc.sql("UPDATE outbox SET status = 'DEAD', lease_until = NULL, last_error = :error WHERE id = :id")
-                .param("id", id)
-                .param("error", truncate(error))
-                .update();
+    public DeadLetter markDead(UUID id, int attempt, String error) {
+        DeadLetter result = tx.execute(status -> {
+            // Document row first, then the job row: the lock order of the PUT, the swap and the delete's cascade.
+            jdbc.sql("""
+                            SELECT d.id FROM documents d JOIN outbox o ON o.document_id = d.id
+                            WHERE o.id = :id FOR UPDATE OF d
+                            """)
+                    .param("id", id)
+                    .query(UUID.class)
+                    .optional();
+            List<Map<String, Object>> dead = jdbc.sql("""
+                            UPDATE outbox SET status = 'DEAD', lease_until = NULL, last_error = :error
+                            WHERE id = :id AND attempts = :attempt AND status = 'IN_PROGRESS'
+                            RETURNING document_id, content_hash
+                            """)
+                    .param("id", id)
+                    .param("attempt", attempt)
+                    .param("error", truncate(error))
+                    .query()
+                    .listOfRows();
+            if (dead.isEmpty()) return new DeadLetter(false, false);
+            int failed = jdbc.sql("""
+                            UPDATE documents SET status = 'failed', updated_at = now()
+                            WHERE id = :doc AND content_hash = :hash AND status = 'queued'
+                            """)
+                    .param("doc", dead.getFirst().get("document_id"))
+                    .param("hash", dead.getFirst().get("content_hash"))
+                    .update();
+            return new DeadLetter(true, failed == 1);
+        });
+        return result == null ? new DeadLetter(false, false) : result;
+    }
+
+    @Override
+    public long countUnresolvedDead() {
+        return jdbc.sql("""
+                        SELECT count(*) FROM outbox o
+                        WHERE o.status = 'DEAD'
+                          AND NOT EXISTS (SELECT 1 FROM outbox n
+                                          WHERE n.document_id = o.document_id AND n.created_at > o.created_at)
+                        """)
+                .query(Long.class)
+                .single();
     }
 
     static String truncate(String error) {

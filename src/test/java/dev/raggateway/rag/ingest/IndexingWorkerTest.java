@@ -133,7 +133,10 @@ class IndexingWorkerTest {
         assertThat(fakes.documents.get(ok1).status()).isEqualTo(DocumentStatus.INDEXED);
         assertThat(fakes.documents.get(ok2).status()).isEqualTo(DocumentStatus.INDEXED);
 
-        embedder.failWhen = inputs -> false;   // Ollama is back: the released job is retried on a later poll
+        embedder.failWhen = inputs -> false;   // Ollama is back: the released job is retried once its backoff is over
+        assertThat(fakes.outbox.retries).containsExactly(Duration.ofSeconds(30));
+        assertThat(worker.pollOnce()).isZero();
+        fakes.advance(Duration.ofSeconds(30));
         assertThat(worker.pollOnce()).isEqualTo(1);
         assertThat(job.status).isEqualTo(JobStatus.DONE);
         assertThat(job.attempts).isEqualTo(2);
@@ -261,15 +264,23 @@ class IndexingWorkerTest {
             }
 
             @Override
-            public void markDone(UUID id) {
+            public boolean markDone(UUID id, int attempt) {
+                return false;
             }
 
             @Override
-            public void release(UUID id, String error) {
+            public boolean release(UUID id, int attempt, String error, Duration retryAfter) {
+                return false;
             }
 
             @Override
-            public void markDead(UUID id, String error) {
+            public DeadLetter markDead(UUID id, int attempt, String error) {
+                return new DeadLetter(false, false);
+            }
+
+            @Override
+            public long countUnresolvedDead() {
+                throw new IllegalStateException("connection refused");
             }
         }, fakes.documents, fakes.chunks, chunker, embedder, 4, Duration.ofMinutes(5), 20);
 

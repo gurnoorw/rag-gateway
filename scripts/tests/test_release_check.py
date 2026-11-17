@@ -18,8 +18,9 @@ SCRIPT = REPO / "scripts/release_check.sh"
 LINE = re.compile(r"^(OK|FAIL|SKIP) +(\S+) ")
 
 
-def run(*args):
-    return subprocess.run(["bash", str(SCRIPT), *args], cwd=REPO, capture_output=True, text=True, timeout=600)
+def run(*args, env=None):
+    return subprocess.run(["bash", str(SCRIPT), *args], cwd=REPO, capture_output=True, text=True, timeout=600,
+                          env=env)
 
 
 def checks(stdout):
@@ -91,3 +92,12 @@ class ShellSyntaxTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_a_wording_scan_without_its_pattern_file_is_a_skip_not_a_pass(self):
+        # D-56: the scan exits 0 when it has no terms to look for, but a release check that checked nothing fails.
+        import os
+        env = dict(os.environ, WORDING_PATTERNS_FILE=str(REPO / "build" / "no-such-pattern-file.txt"))
+        result = run("--skip-build", env=env)
+        self.assertIn(("wording", "SKIP"), checks(result.stdout), result.stdout)
+        self.assertEqual(1, result.returncode, result.stdout)
+

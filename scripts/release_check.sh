@@ -46,15 +46,19 @@ fail() { printf 'FAIL  %-9s %s\n' "$1" "$2"; failed=$((failed + 1)); }
 skip() { printf 'SKIP  %-9s %s\n' "$1" "$2"; failed=$((failed + 1)); }
 detail() { sed -e '/^[[:space:]]*$/d' -e 's/^/          /' | head -"${2:-40}"; }
 
-# Runs a check script; the script's own last OK/FAIL line becomes the summary, its other output the details.
+# Runs a check script; the script's own last OK/FAIL/SKIP line becomes the summary, its other output the details.
+# A script that exits 0 with a SKIP line is reported as SKIP, which fails the release like a FAIL.
 run_script() { # name, then the command
   local name=$1; shift
   "$@" > "$work/$name.out" 2>&1
   local rc=$?
-  local summary
-  summary=$(grep -E '^(OK|FAIL|SKIP) ' "$work/$name.out" | tail -1 | sed -E 's/^(OK|FAIL|SKIP) +//')
+  local summary last
+  last=$(grep -E '^(OK|FAIL|SKIP) ' "$work/$name.out" | tail -1)
+  summary=$(printf '%s' "$last" | sed -E 's/^(OK|FAIL|SKIP) +//')
   [ -n "$summary" ] || summary=$(tail -1 "$work/$name.out")
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 0 ] && [ "${last%% *}" = "SKIP" ]; then
+    skip "$name" "$summary"     # ran but did not check anything: not a pass (t14 review, D-56)
+  elif [ "$rc" -eq 0 ]; then
     ok "$name" "$summary"
   else
     fail "$name" "${summary:-exit $rc} (exit $rc)"

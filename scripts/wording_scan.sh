@@ -7,7 +7,8 @@
 # The terms to look for live in `private/wording-patterns.txt` of this checkout, which is gitignored and kept by
 # the owner: a committed list of terms to avoid would itself put them in the public repository. No term list is
 # committed anywhere. WORDING_PATTERNS_FILE points at another pattern file (used by the tests with a temporary
-# file). Without a pattern file the scan prints "skipped: no private pattern file" and exits 0.
+# file). Without a pattern file the scan prints a SKIP line ("skipped: no private pattern file") and exits 0, so
+# it can run anywhere; release_check.sh reports that SKIP as a failure (a check that did not run is not a pass).
 #
 # Pattern file: one term per line, matched as a fixed string, case-insensitively; blank lines and lines
 # starting with `#` are ignored. Every tracked file in the working tree is searched (`git grep`, binary files
@@ -22,7 +23,7 @@ if [ $# -gt 0 ]; then REPO=$1; else REPO=$HERE; fi
 PATTERNS=${WORDING_PATTERNS_FILE:-$HERE/private/wording-patterns.txt}
 
 if [ ! -f "$PATTERNS" ]; then
-  echo "OK    wording scan skipped: no private pattern file ($PATTERNS)"
+  echo "SKIP  wording scan skipped: no private pattern file ($PATTERNS)"
   exit 0
 fi
 git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || { echo "FAIL  not a git repository: $REPO"; exit 2; }

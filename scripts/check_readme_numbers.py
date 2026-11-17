@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Holds the README's measured tables to the committed run files (t08, D-45; t13, D-53).
+"""Holds the README's measured tables to the committed run files (t08, D-45; t13, D-53; t14, D-55).
 
     python3 scripts/check_readme_numbers.py
+    python3 scripts/check_readme_numbers.py --release
     python3 scripts/check_readme_numbers.py --readme README.md --summary-dir bench/summary \\
-        --schema bench/summary.schema.json --results-dir eval/results --results-schema eval/results.schema.json
+        --schema bench/summary.schema.json --results-dir eval/results --results-schema eval/results.schema.json \\
+        --runbook docs/RUNBOOK.md --allowlist docs/process/release-pending-allowlist.txt
 
 The measured table sits between ``<!-- measured:begin -->`` and ``<!-- measured:end -->`` and has the columns
 Metric | Value | Unit | Measured on | Run | Source key. For every row:
@@ -39,6 +41,19 @@ its keys are checked against ``eval/results.schema.json``; array items are selec
 "MacBook" may appear in the README only inside measured or eval rows whose run file's ``measured_on`` says MacBook
 (AC-t08-3): a laptop label never appears without the laptop run behind it.
 
+Links (t14, AC-t14-10): every relative link in the README and in ``docs/RUNBOOK.md`` (Markdown links and images,
+reference definitions, HTML ``href``/``src``) must resolve to a file tracked by git (``git ls-files``) inside the
+repository; a link to a directory needs a tracked file under it. Links with a scheme (``https:``, ``mailto:``) and
+in-page anchors (``#status``) are not checked; a ``path#anchor`` is checked for its path. Text in fenced code blocks,
+inline code and HTML comments is not a link. A broken image link is reported as a missing image. This check runs in
+both modes: a broken link is wrong whether or not a release is being cut.
+
+``--release`` (t14, D-55) adds the release rule: every ``pending`` / ``pending laptop run`` Value cell, in the
+measured or the eval table, fails unless its Metric text is a line of ``docs/process/release-pending-allowlist.txt``
+(exact text; blank lines and ``#`` comments ignored). The file names nothing by default, so shipping without a
+number is the owner's explicit choice. Two pending rows with the same Metric text fail in release mode, because one
+allowlist line could not tell them apart. Allowlist lines that match no pending row are printed as a notice.
+
 It then lists every other number in the README outside the designed-for table (between
 ``<!-- designed-for:begin -->`` and ``<!-- designed-for:end -->``) and outside the checked Value cells, with
 line numbers, for the reviewer's AC-t08-4 check. The list is informational and never fails the run.
@@ -47,10 +62,13 @@ Standard library only. Exit code 0 when every check passes, 1 otherwise, 2 on a 
 """
 import argparse
 import json
+import os
 import pathlib
 import re
+import subprocess
 import sys
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from urllib.parse import unquote
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -62,6 +80,8 @@ EVAL_COLUMNS = ["Metric", "Value", "Unit", "Measured on", "Embedder", "Run", "So
 EVAL_EMBEDDERS = {"none", "nomic-embed-text"}
 MODEL_EMBEDDER = "nomic-embed-text"
 PENDING = {"pending", "pending laptop run"}
+ALLOWLIST = REPO / "docs/process/release-pending-allowlist.txt"
+RUNBOOK = REPO / "docs/RUNBOOK.md"
 
 # unit -> (decimals, scale, rule). rule checks the key segments / schema node the unit may be used with.
 COUNT_UNITS = {"requests", "count", "errors", "streams", "threads"}
@@ -223,6 +243,115 @@ def readme_value(cell):
     return text
 
 
+# ---------------------------------------------------------------- links (AC-t14-10)
+
+INLINE_LINK = re.compile(r"(!?)\[(?:[^\[\]]|\[[^\]]*\])*\]\(\s*(<[^>]*>|[^\s)]+)(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+REF_DEFINITION = re.compile(r"^ {0,3}\[[^\]]+\]:\s*(<[^>]*>|\S+)")
+HTML_LINK = re.compile(r"<(img|a|source)\b[^>]*?\b(src|href|srcset)\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
+CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
+COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def tracked_files(root):
+    """Paths git tracks under root (relative, '/'-separated), or None if git cannot list them."""
+    try:
+        res = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return {p for p in res.stdout.decode("utf-8").split("\0") if p}
+
+
+def links_in(text):
+    """(line number, target, is_image) for every link outside fenced code, inline code and HTML comments."""
+    text = COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    found = []
+    in_code = False
+    for n, line in enumerate(text.splitlines(), start=1):
+        if line.lstrip().startswith(("```", "~~~")):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        line = CODE_SPAN.sub("", line)
+        for m in INLINE_LINK.finditer(line):
+            found.append((n, m.group(2).strip("<>"), m.group(1) == "!"))
+        m = REF_DEFINITION.match(line)
+        if m:
+            found.append((n, m.group(1).strip("<>"), False))
+        for m in HTML_LINK.finditer(line):
+            target = m.group(3).split()[0] if m.group(2).lower() == "srcset" else m.group(3)
+            found.append((n, target, m.group(1).lower() in ("img", "source")))
+    return found
+
+
+def check_links(paths, root, failures):
+    """Every relative link in the given files resolves to a tracked file under root. Returns the links checked."""
+    root = pathlib.Path(root).resolve()
+    tracked = tracked_files(root)
+    if tracked is None:
+        failures.add(str(root), "cannot list tracked files (git ls-files failed): the link check did not run")
+        return 0
+    checked = 0
+    for path in paths:
+        path = pathlib.Path(path).resolve()
+        try:
+            shown = path.relative_to(root).as_posix()
+        except ValueError:
+            shown = str(path)
+        for line_no, target, image in links_in(path.read_text(encoding="utf-8")):
+            if not target or target.startswith(("#", "//")) or SCHEME.match(target):
+                continue
+            checked += 1
+            bare = unquote(target.split("#", 1)[0].split("?", 1)[0])
+            base = root if bare.startswith("/") else path.parent
+            resolved = pathlib.Path(os.path.normpath(base / bare.lstrip("/")))
+            what = "image" if image else "link"
+            where = f"{shown} line {line_no}"
+            try:
+                rel = resolved.relative_to(root).as_posix()
+            except ValueError:
+                failures.add(where, f"{what} '{target}' points outside the repository")
+                continue
+            if rel in tracked or rel == "." or any(t.startswith(rel + "/") for t in tracked):
+                continue  # a tracked file, or a directory holding one
+            if image:
+                failures.add(where, f"image '{target}' is missing: {rel} is not a committed file")
+            else:
+                failures.add(where, f"link '{target}' does not resolve to a committed file ({rel})")
+    return checked
+
+
+# ---------------------------------------------------------------- release mode (D-55)
+
+def read_allowlist(path):
+    """The Metric texts the owner allows to stay pending at release: one per line, '#' starts a comment line."""
+    lines = pathlib.Path(path).read_text(encoding="utf-8").splitlines()
+    return [s.strip() for s in lines if s.strip() and not s.strip().startswith("#")]
+
+
+def check_release(pending, allowlist_path, failures, out):
+    """pending: (line index, table, metric). Each pending cell not on the allowlist fails. Returns the allowed count."""
+    allowed = set(read_allowlist(allowlist_path))
+    by_metric = {}
+    for i, _, metric in pending:
+        by_metric.setdefault(metric, []).append(i)
+    for metric, idx in by_metric.items():
+        if len(idx) > 1:
+            failures.add("lines " + ", ".join(str(i + 1) for i in idx),
+                         f"pending rows share the Metric '{metric}', so one allowlist line cannot name one of them")
+    ok = 0
+    for i, table, metric in pending:
+        if metric in allowed:
+            ok += 1
+        else:
+            failures.add(f"line {i + 1}", f"pending {table} cell blocks the release: '{metric}' "
+                                          f"(not in {pathlib.Path(allowlist_path).name})")
+    for entry in sorted(allowed - set(by_metric)):
+        print(f"notice: allowlist entry matches no pending row: '{entry}'", file=out)
+    return ok
+
+
 # ---------------------------------------------------------------- README
 
 def section(lines, begin, end):
@@ -254,7 +383,7 @@ def needs_model(key, data=None):
     return False
 
 
-def check_eval(lines, results_dir, schema, failures, checked_value_lines, macbook_ok_lines, row_lines):
+def check_eval(lines, results_dir, schema, failures, checked_value_lines, macbook_ok_lines, row_lines, pending=None):
     """The eval table (t13). Returns (rows, rows compared to a results file)."""
     span = section(lines, EVAL_BEGIN, EVAL_END)
     if span is None:
@@ -299,6 +428,8 @@ def check_eval(lines, results_dir, schema, failures, checked_value_lines, macboo
         if value in PENDING:
             if run:
                 failures.add(where, f"'{value}' row must have an empty Run, got '{run}'")
+            if pending is not None:
+                pending.append((i, "eval", metric))
             continue
         if not run:
             failures.add(where, "a measured value needs a Run")
@@ -340,8 +471,11 @@ def check_eval(lines, results_dir, schema, failures, checked_value_lines, macboo
     return rows, compared
 
 
-def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=None, results_schema_path=None):
+def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=None, results_schema_path=None,
+          release=False, allowlist_path=None, link_files=None, repo_root=None):
+    """Runs every check; returns 0 or 1. Links are checked only when link_files is given (against repo_root)."""
     failures = Failures()
+    pending = []  # (line index, table, metric) of every pending Value cell
     results_dir = pathlib.Path(results_dir) if results_dir else REPO / "eval/results"
     results_schema_path = results_schema_path or REPO / "eval/results.schema.json"
     readme_path = pathlib.Path(readme_path)
@@ -406,6 +540,7 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=Non
             if value in PENDING:
                 if run:
                     failures.add(where, f"'{value}' row must have an empty Run, got '{run}'")
+                pending.append((i, "measured", metric))
                 continue
 
             if not run:
@@ -440,7 +575,7 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=Non
                                     f"({key} = {actual} in {run_file.name})")
 
     eval_rows, eval_checked = check_eval(lines, results_dir, load_json(results_schema_path), failures,
-                                         checked_value_lines, macbook_ok_lines, measured_rows)
+                                         checked_value_lines, macbook_ok_lines, measured_rows, pending)
 
     for i, line in enumerate(lines):
         if "MacBook" in line and i not in macbook_ok_lines:
@@ -466,6 +601,13 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=Non
         if found:
             others.append((i + 1, "code" if in_code else "text", found, line.strip()))
 
+    links_checked = None
+    if link_files:
+        links_checked = check_links(link_files, repo_root or REPO, failures)
+    allowed = 0
+    if release:
+        allowed = check_release(pending, allowlist_path or ALLOWLIST, failures, out)
+
     print(f"README: {readme_path}", file=out)
     measured_checked = len(checked_value_lines) - eval_checked
     print(f"measured rows: {rows}, compared to a run file: {measured_checked}, "
@@ -479,6 +621,12 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=Non
         shown = text if len(text) <= 110 else text[:107] + "..."
         print(f"  {line_no:4d} [{kind}] {', '.join(found)}  ::  {shown}", file=out)
     print("", file=out)
+    if links_checked is not None:
+        names = ", ".join(pathlib.Path(p).name for p in link_files)
+        print(f"relative links checked in {names}: {links_checked}", file=out)
+    if release:
+        print(f"release mode: {len(pending)} pending cell(s), {allowed} on the allowlist, "
+              f"{len(pending) - allowed} blocking", file=out)
     if failures.items:
         print(f"FAIL ({len(failures.items)}):", file=out)
         for f in failures.items:
@@ -486,7 +634,8 @@ def check(readme_path, summary_dir, schema_path, out=sys.stdout, results_dir=Non
         return 1
     print(f"OK: {measured_checked} measured value(s) match their run files; "
           f"{rows - measured_checked} row(s) pending, with valid keys and labels; "
-          f"{eval_checked} eval value(s) match their results files, {eval_rows - eval_checked} pending", file=out)
+          f"{eval_checked} eval value(s) match their results files, {eval_rows - eval_checked} pending"
+          + ("; release mode: every pending cell is on the allowlist" if release else ""), file=out)
     return 0
 
 
@@ -497,13 +646,22 @@ def main(argv=None):
     parser.add_argument("--schema", default=str(REPO / "bench/summary.schema.json"))
     parser.add_argument("--results-dir", default=str(REPO / "eval/results"))
     parser.add_argument("--results-schema", default=str(REPO / "eval/results.schema.json"))
+    parser.add_argument("--runbook", default=str(RUNBOOK), help="link-checked with the README (AC-t14-10)")
+    parser.add_argument("--repo-root", default=str(REPO), help="links must resolve to files git tracks here")
+    parser.add_argument("--release", action="store_true",
+                        help="fail on every pending cell whose Metric the allowlist does not name (D-55)")
+    parser.add_argument("--allowlist", default=str(ALLOWLIST))
     args = parser.parse_args(argv)
-    for p in (args.readme, args.schema, args.results_schema):
+    required = [args.readme, args.schema, args.results_schema, args.runbook]
+    if args.release:
+        required.append(args.allowlist)
+    for p in required:
         if not pathlib.Path(p).is_file():
             print(f"missing file: {p}", file=sys.stderr)
             return 2
     return check(args.readme, args.summary_dir, args.schema, results_dir=args.results_dir,
-                 results_schema_path=args.results_schema)
+                 results_schema_path=args.results_schema, release=args.release, allowlist_path=args.allowlist,
+                 link_files=[args.readme, args.runbook], repo_root=args.repo_root)
 
 
 if __name__ == "__main__":

@@ -117,6 +117,7 @@ After the acceptance of every task:
 ```bash
 bash scripts/release_check.sh                      # every check except the version: run until green
 sed -i.bak 's/^version = ".*"/version = "1.0.0"/' build.gradle.kts && rm build.gradle.kts.bak
+sed -i.bak "s/^## \[1.0.0\] - Unreleased/## [1.0.0] - $(date +%Y-%m-%d)/" CHANGELOG.md && rm CHANGELOG.md.bak
 git commit -am "release: 1.0.0"
 bash scripts/release_check.sh --version 1.0.0      # the same checks, plus version and changelog entry
 git tag -a v1.0 -m "rag-gateway 1.0.0"

@@ -101,4 +101,12 @@ class RagSchemaTest extends AbstractPostgresTest {
                 .param("d", doc).query(Boolean.class).single();
         assertThat(matches).isTrue();
     }
+
+    @Test
+    void outboxHasTheV5IndexesForCascadesAndTheDeadGauge() {
+        List<String> defs = jdbc.sql("SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'outbox'")
+                .query(String.class).list();
+        assertThat(defs).anySatisfy(d -> assertThat(d).contains("outbox_document").contains("(document_id, created_at)"));
+        assertThat(defs).anySatisfy(d -> assertThat(d).contains("outbox_dead").contains("WHERE (status = 'DEAD'::text)"));
+    }
 }

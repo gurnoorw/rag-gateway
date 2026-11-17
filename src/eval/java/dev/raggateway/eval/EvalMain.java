@@ -3,6 +3,8 @@ package dev.raggateway.eval;
 import ch.qos.logback.classic.Level;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.raggateway.core.CharRatioTokenEstimator;
+import dev.raggateway.eval.judge.AnswerEvalRunner;
+import dev.raggateway.eval.judge.JudgeClient;
 import dev.raggateway.rag.Embedder;
 import dev.raggateway.rag.RagProperties;
 import dev.raggateway.rag.RetrievalMode;
@@ -20,6 +22,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import javax.sql.DataSource;
 
 import java.io.IOException;
+import java.io.PrintStream;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -42,7 +45,10 @@ import java.util.Set;
  * ./gradlew eval --args="retrieval --modes keyword --measured-on 'cloud container, 4 vCPU / 15 GB'"
  * ./gradlew eval --args="retrieval --modes keyword,vector,hybrid --embedder nomic-embed-text --measured-on '…'"
  * ./gradlew eval --args="retrieval --modes keyword,vector,hybrid --embedder fake --out build/eval/smoke.json --measured-on '…'"
+ * ./gradlew eval --args="answers collect --questions eval/questions.v1.jsonl --out build/eval/answers.jsonl"
+ * ./gradlew eval --args="answers score --answers build/eval/answers.jsonl --dry-run"
  * </pre>
+ * {@code answers ...} is handed to {@link AnswerEvalRunner} unchanged (its javadoc lists the options).
  * {@code retrieval} indexes the loaded {@code k8s-docs} collection into tenant {@code eval} at each chunk size
  * ({@link EvalIndexer}), scores every mode asked at each size ({@link RetrievalEvalRunner}), runs the ACL eval at
  * 400 ({@link AclEvalRunner}) and writes one results file ({@link EvalResultsWriter}).
@@ -72,12 +78,20 @@ public final class EvalMain {
 
     public static void main(String[] args) throws Exception {
         quietLogs();
+        if (args.length > 0 && args[0].equals("answers")) {
+            System.exit(answers(args, System.getenv(), System.out, JudgeClient::create));
+        }
         try {
             System.exit(run(args, Path.of("").toAbsolutePath()));
         } catch (IllegalArgumentException e) {
             System.err.println("error: " + e.getMessage());
             System.exit(2);
         }
+    }
+
+    /** The answer eval (judge and deterministic checks): {@code answers collect|score ...}. */
+    static int answers(String[] args, Map<String, String> env, PrintStream out, AnswerEvalRunner.ClientFactory factory) {
+        return AnswerEvalRunner.run(args, env, out, factory);
     }
 
     static int run(String[] args, Path repo) throws IOException {
@@ -95,7 +109,8 @@ public final class EvalMain {
     private static Options parse(String[] args) {
         if (args.length == 0 || !args[0].equals("retrieval")) {
             throw new IllegalArgumentException("usage: retrieval --measured-on '<hardware label>' [--modes keyword]"
-                    + " [--embedder none|fake|nomic-embed-text] [--sizes 200,400,800] [--out <path>]; see EvalMain");
+                    + " [--embedder none|fake|nomic-embed-text] [--sizes 200,400,800] [--out <path>],"
+                    + " or answers collect|score ...; see EvalMain");
         }
         return Options.parse(Arrays.copyOfRange(args, 1, args.length));
     }

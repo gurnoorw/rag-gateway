@@ -306,7 +306,8 @@ public final class AnswerEvalRunner {
         return JSON.writeValueAsString(sub);
     }
 
-    static List<AnswerScorer.Item> readItems(Path file) throws IOException {
+    /** Reads a file written by {@code collect}. */
+    public static List<AnswerScorer.Item> readItems(Path file) throws IOException {
         List<AnswerScorer.Item> items = new ArrayList<>();
         for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
             if (line.isBlank()) continue;

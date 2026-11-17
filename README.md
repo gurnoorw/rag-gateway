@@ -1,6 +1,6 @@
 # rag-gateway
 
-An LLM gateway with an OpenAI-compatible `POST /v1/chat/completions` endpoint, built in Java 21 and Spring Boot 3. A RAG endpoint on top of it is the next milestone (see [Status](#status)).
+An LLM gateway with an OpenAI-compatible `POST /v1/chat/completions` endpoint, built in Java 21 and Spring Boot 3. A RAG endpoint on top of it (`POST /v1/rag/query`) answers questions from indexed documents through the same pipeline; ACL hardening and the retrieval evaluation are still to come (see [Status](#status)).
 
 ## What it is
 
@@ -24,7 +24,8 @@ On every chat request the gateway:
 | Gateway path (t01–t07): auth, rate limit, budget, cost log, fallback, metrics, cache, routing, output validation | Built and tested (JUnit 5 + Testcontainers, WireMock providers) |
 | Benchmarks (t08) | k6 harness against WireMock mocks; one committed run on a cloud container (see [Measured](#measured)); laptop run pending |
 | RAG ingestion (t09): document API, outbox, chunking, embeddings into pgvector | Built and tested; embeddings here come from a deterministic fake (Ollama is not reachable in the build environment), the Ollama adapter is tested against WireMock |
-| RAG path (t10–t13): hybrid retrieval, ACL filtering, evals | Not built yet |
+| RAG query (t10): hybrid retrieval (Postgres full-text + pgvector, reciprocal rank fusion), answers with citations through the chat pipeline | Built and tested against WireMock providers and the fake embedder; no retrieval-quality numbers yet |
+| RAG hardening and evals (t11–t13): incremental indexing, ACL leakage suite, retrieval and answer evaluation | Not built yet |
 
 ## Quickstart
 
@@ -131,6 +132,18 @@ curl -sS "http://localhost:8080/v1/usage?from=2026-11-01&to=2026-12-01" -H "Auth
 # {"tenant_id":"acme","from":"2026-11-01","to":"2026-12-01","requests":..,"input_tokens":..,"output_tokens":..,"cost_usd":".."}
 ```
 
+Ask a question over a document collection (the caller key's tenant and ACL groups decide which chunks it can see; `top_k` 1–20, `mode` `hybrid` | `vector` | `keyword`):
+
+```bash
+curl -sS http://localhost:8080/v1/rag/query -H "Authorization: Bearer $RGW_KEY" -H 'Content-Type: application/json' \
+  -d '{"collection":"k8s-docs","question":"How do I roll back a Deployment?","top_k":5}'
+# {"answer":"... [S1] ...","citations":[{"source":"S1","chunk_id":..,"doc_id":..,"title":..}],
+#  "sources":[{"source":"S1",..,"score":..,"keyword_rank":..,"vector_rank":..}],"no_answer":false,
+#  "retrieval_mode":"hybrid","model":..,"usage":{..},"request_id":..}
+```
+
+No visible chunk means `no_answer: true` and no model call. `retrieval_mode` says `keyword` when the embedding model was unreachable and a hybrid query fell back to full-text search.
+
 OpenAI Python SDK:
 
 ```python
@@ -142,7 +155,7 @@ for chunk in client.chat.completions.create(model="auto", stream=True,
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
-Errors are OpenAI-shaped JSON (`{"error":{"message","type","code","request_id"}}`) before the first byte, and an SSE `error` event after it. Main codes: 401 bad key, 400 invalid request, 403 `model_not_allowed`, 429 `rate_limited` (with `Retry-After`) or `budget_exceeded`, 502 `invalid_model_output`, 503 `all_providers_failed`.
+Errors are OpenAI-shaped JSON (`{"error":{"message","type","code","request_id"}}`) before the first byte, and an SSE `error` event after it. Main codes: 401 bad key, 400 invalid request, 403 `model_not_allowed`, 429 `rate_limited` (with `Retry-After`) or `budget_exceeded`, 502 `invalid_model_output`, 503 `all_providers_failed` (every chat provider failed), `overloaded` (instance at its in-flight limit) or `service_unavailable` (the database or the embedding model a RAG query needs is unreachable).
 
 `bash scripts/demo.sh` runs the main behaviours end to end against the mock profile: a 429 with `Retry-After`, a cache hit, a fallback with the Claude mock stopped, a schema-validated answer (and a non-conforming one retried once, then 502) and `/v1/usage`, printing what each step expects and what it got. It needs the mock stack and the app running (quickstart steps 1 and 2), creates its own demo tenants, and restarts the Claude mock when it ends.
 
@@ -281,6 +294,9 @@ Notes on the rows:
 - **Budget overshoot is bounded, not zero (C22).** The budget is checked before the call and charged after it, so a tenant can overshoot by its requests in flight × the cost of one request.
 - **Document writes are admin-only and capped per instance, not rate-limited per tenant (D-47).** At most 4 document PUTs per instance are past admission at once (503 `overloaded` above that), bodies are limited to 1 MB, and none of it is charged to a tenant's token bucket or budget.
 - **Indexing is asynchronous and at-least-once (C4, D-48).** A 202 means saved and queued, not searchable; `GET` on the document shows when it is `indexed`. A job can run twice (a crashed worker's lease runs out); the chunk swap is idempotent and only writes the version the document still holds, so a slow or repeated job never replaces newer chunks. Until t11, every PUT re-embeds the document, even when nothing changed.
+- **Prompt injection from documents is reduced, not prevented (D-49, D-50).** Retrieved chunks go into the prompt inside `<source>` blocks. Any `<source` or `</source` written inside a chunk is defused: any letter case, fullwidth letters, whitespace or invisible characters inside the tag, fullwidth or small look-alike brackets. The system prompt tells the model to treat sources as data. Look-alike letters from other scripts are not folded, and a chunk can still argue in plain prose; the model may follow it. Only admin keys of the same tenant can write documents, so the exposure stays within a tenant.
+- **Retrieval itself is not rate-limited (D-49).** The answer pays the tenant's token bucket and budget like a chat request, but the two searches and the embedding call before it are bounded only by the in-flight limit, and a question with no visible chunks costs nothing.
+- **The vector search is approximate (D-49).** When the HNSW index returns fewer candidates than asked (a selective group filter), the search re-runs exactly over the matching rows; that exact pass is cheap for small collections and is the signal to partition large ones.
 - **The benchmark measures the gateway against mocks**, with load generator, mocks and gateway on one host (D-45). It says nothing about real provider latency or provider-side rate limits.
 
 ## How to reproduce

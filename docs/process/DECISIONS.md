@@ -86,6 +86,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-47 | Ingestion details (t09 prep) | snake_case body, admin-only PUT and GET, write cap; bounded worker and embed batches; no connection held while embedding; Ollama `/api/embed` with task prefixes; word-hashing fake; pinned corpus |
 | D-48 | t09 review rulings | version-checked chunk swap; bounded heading carry; drain full batches; one prefix definition; worker bean unconditional; Dev A/B choices accepted |
 | D-49 | Retrieval and RAG answer details (t10 prep) | exact OR keyword SQL; ACL/tenant in both legs; `ef_search` 100 + strict iterative scan per query; RRF tie rule; S-labelled delimited prompt through the shared pipeline; no-sources answer without a call; keyword-only degradation; amended: exact re-run when the HNSW pass is short |
+| D-50 | t10 review rulings | 503 `service_unavailable` for an unreachable database or embedder; tag defusing widened (case, width, invisible characters, look-alike brackets); shared label policy; no existence probe; re-index misses the cache |
 
 ---
 
@@ -880,4 +881,41 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - `RetrievalSqlTest` keeps the SQL-level contrast: full with the settings, short with pgvector's defaults. It adds `VECTOR_EXACT` against a ground-truth query, and an `EXPLAIN` without the HNSW index.
   - `ChunkSearchRepositoryTest` asserts the full list through the index, the counted fallback with exact order when the HNSW pass is forced short, and that a collection with fewer matching rows than the limit returns them all.
   - Before this, its control assertion ("without the iterative scan the repository under-fills") tested the flaw, not the contract. It now asserts the fallback instead.
+
+### D-50. t10 review rulings
+- **Checked, and why each holds:**
+  - **No pipeline bypass.**
+    - `/v1/rag/query` passes the in-flight limit (D-46) and the edge's key check like chat.
+    - `RagService` builds a `ChatRequest` and runs `GatewayPipeline.run`. Cache, rate limit and budget, routing, fallback, output checks, the request log and metrics apply; `RagQueryIT` shows the log row, the token bucket, a cache hit and chat's error statuses.
+  - **A re-index can't serve a stale cached answer.** The cache key holds the messages (D-40), and the prompt holds each source's text and title. Changed chunk text means a new key. `RagQueryIT.aReindexedSourceMissesTheCacheForTheSameQuestion` covers it.
+    - An ACL-only change keeps the same text, so it can still hit. That is correct: retrieval already decided the caller may see those chunks.
+  - **Pool budget.** A query holds at most two connections at once (the legs), then one for the log row.
+    - Probe on a 3-connection Hikari pool (2 s connection timeout, fake embedder, 40 documents): 1, 3, 10 and 30 concurrent retrievals with 0 failures; p95 14 ms at 3 and 88 ms at 30.
+    - Saturation shows up as waiting, and only past the 2 s timeout as the 503 below.
+  - **No chunk text in logs.**
+    - RAG log lines carry modes, counts, chunk ids, cited labels, error codes and exception class names.
+    - The only free text is a degraded embedder's exception string (Ollama's short error message, at most 200 characters, D-47).
+- **a. Database failure during retrieval: a new 503 `service_unavailable`.**
+  - An unreachable database, pool timeout or query timeout (`DataAccessResourceFailureException`, `TransientDataAccessException`, and `CannotCreateTransactionException`, which is what a pool timeout inside the vector leg's transaction throws, and which is not a `DataAccessException`) is transient. It isn't the caller's fault.
+  - Load balancers and clients treat 503 as "retry elsewhere or later"; a 500 says "bug". So these return 503 `service_unavailable` with "retrieval is temporarily unavailable; retry shortly".
+  - Any other `DataAccessException` (bad SQL, a constraint) stays 500 `internal_error` "retrieval failed; try again". Neither carries driver text.
+  - A new code rather than reusing `all_providers_failed` or `overloaded`: each of those means something specific (every chat provider failed; this instance is at its in-flight limit), and dashboards and alerts read the code.
+- **b. Dev A's choices:**
+  - The vector-mode embedder failure moves from `all_providers_failed` to `service_unavailable`: the embedder isn't a chat provider, and the request log would otherwise count it as a provider outage.
+  - `leg` values `keyword|embed|vector` are accepted; the label policy bounds them (D-49).
+  - The extra `rag.retrieval.duration{mode}` is accepted (whole retrieval, alongside the per-leg timers).
+  - The INFO line with chunk ids only is accepted.
+- **c. Dev B's AC-t10-16 check: replaced with the shared policy.**
+  - `MetricLabelPolicy` is now public, and `RagQueryIT` runs it on its scrape, so there is one policy and not two that can drift.
+  - The `result` bound (`answered|no_sources|error`) stays as a RAG-specific assertion, because other metrics use `result` with other values.
+- **d. Empty groups: accepted, with no probe possible.**
+  - A key with no groups returns `no_answer` without SQL or an embed call.
+  - A key with groups gets the same `no_answer` for a missing collection, a collection with no visible chunk, and a question nothing matches. The body and status are identical, so a caller can't learn whether a collection or document exists. Only timing differs (no SQL for empty groups), and it says nothing about the collection.
+- **e. Prompt delimiting: widened.**
+  - Before: `<source` and `</source` in any letter case were defused, but `< /source>`, a zero-width space inside the tag, fullwidth `＜／ｓｏｕｒｃｅ＞` and small `﹤` passed through.
+  - Now a less-than sign or look-alike (U+FF1C, U+FE64) is defused when it is followed by whitespace, invisible format characters or slashes (`/`, U+FF0F) and then `source` in any case or width (NFKC). Look-alike brackets and quotes in titles are escaped too. Linear in the chunk length; tests cover the variants and a 1 MB chunk full of tags.
+  - Not handled: look-alike letters from other scripts (Cyrillic `ѕ`, `о`). They aren't folded by NFKC, and a full confusables table isn't worth it, because plain prose can inject anyway.
+  - The README limitation now states exactly what is and isn't covered. The exposure stays within a tenant, because only its admin keys write documents.
+  - A per-prompt random boundary was rejected: it breaks byte-identical prompts, and so the cache. A content-derived boundary was rejected as well: it adds complexity without stopping prose injection.
+- **README:** the t10 status rows, a `POST /v1/rag/query` example, `service_unavailable` among the codes, and three limitations (prompt injection, retrieval not rate-limited, approximate vector search with an exact fallback).
 

@@ -629,40 +629,82 @@ Merge A, then B. Run `./gradlew clean build`. Then, with the corpus loaded (fake
 
 ## t11 and t12 (Round R10, two tasks; t11 merges first)
 
+**Round prep (reviewer, on `main`):**
+- `rag/query/AclAudit` (+ `AclAuditTest`): returns the chunk ids a caller was shown but may not see, re-derived from the chunk rows independently of the retrieval SQL. It is in main code so the t13 eval can reuse it.
+- `MetricNames.INGEST_DOCUMENTS` result values and the `OUTBOX_DEAD` gauge semantics (D-51).
+- Rulings in D-51.
+- **File split:**
+  - t11 touches only `rag/ingest/**` (main and test), plus `application.yml` and `docs/` notes.
+  - t12 touches only `rag/query/**` (main and test).
+  - Neither edits `support/`, `metrics/`, `auth/`, `error/` or the migrations. Ask the reviewer if one is needed.
+
 ### t11: Incremental indexing (Dev A)
 
-**Design.** The upsert hashes title, content and sorted ACL groups (D-14); same hash → 202 with `"status":"unchanged"`, no outbox row, no embedding. Changed → new job; the worker skips a job whose hash no longer matches the document (stale) before embedding, which saves the call; the last PUT already wins regardless of job order, because since t09 the chunk swap writes only the version the locked document row still holds (D-48). Claims use `FOR UPDATE SKIP LOCKED` with a 5-minute lease; expired leases are reclaimed; after 5 attempts a job is `DEAD` and counted. `DELETE` on the document URL (admin) removes the document; chunks and jobs cascade. Readers see old or new chunks, never a mix, because the swap is one transaction. Decisions: C4, D-14.
-- **Owns:** edits `rag/ingest/DocumentService.java`, `rag/ingest/DocumentController.java`, `rag/ingest/JdbcOutboxStore.java`, `rag/ingest/JdbcDocumentStore.java`, `rag/ingest/IndexingWorker.java`; adds `rag/ingest/IngestMetrics.java`; tests. May request V5 from the reviewer for an index. Owns `application.yml` this round.
+**Design (D-51).**
+- **Write path:** the PUT transaction locks the existing row (`SELECT … FOR UPDATE`) and compares, giving one of three outcomes:
+  - **unchanged:** same hash (title, content, sorted groups, D-47) and status `queued` or `indexed`. 202 `"status":"unchanged"`, no outbox row, no embedding.
+  - **acl_updated:** same title and content, different groups, status `indexed`. In the same transaction, update `documents.acl_groups` and `content_hash` and `UPDATE chunks SET acl_groups` for the document. No job, no embedding. 202 `"status":"acl_updated"`.
+  - **queued:** anything else, including a `failed` document re-PUT unchanged (that is how a dead job is retried). New hash, status `queued`, an outbox row. 202 `"status":"queued"`.
+  - The row lock serialises the PUT with a concurrent chunk swap, which locks the same row (D-48).
+- **Worker:**
+  - **Stale skip:** before embedding, a job whose hash is no longer the document's ends as done (`stale_skipped`). The version-checked swap (D-48) still guards the end.
+  - **Retries with backoff:** `release` keeps the job `PENDING` but sets `lease_until = now() + backoff`, where backoff is 30 s × 2^(attempts−1), capped at 10 min. The claim takes `PENDING` rows only when `lease_until` is null or past.
+  - **Dead jobs:** after 5 attempts, about 7.5 min of retries, the job is `DEAD`. The document becomes `failed` only if it still holds that job's hash. Both are counted.
+  - **Fencing:** `markDone`, `release` and `markDead` take the attempt number the claim returned and change the row only `WHERE id = ? AND attempts = ?`. A worker whose lease ran out and was re-claimed can't overwrite the new owner's state. This extends "never the same job" from the claim to the whole cycle.
+- **Delete:** `DELETE` on the document URL (admin key) deletes the document row; chunks and jobs cascade in that one statement. It is 204 whether or not the document existed (idempotent, and another tenant's document is simply not there). A job in flight finds no document: the swap returns false (D-48) and the job's fenced `markDone` touches 0 rows.
+- Decisions: C4, D-47, D-48, D-51.
+
+- **Owns:**
+  - edits `rag/ingest/DocumentService.java`, `DocumentController.java` (adds DELETE and the outcome statuses), `DocumentStore.java` and `JdbcDocumentStore.java`, `OutboxStore.java` and `JdbcOutboxStore.java`, `OutboxEvent.java`, `UpsertResult.java`, `IndexingWorker.java`;
+  - adds `rag/ingest/IngestMetrics.java` (`rag.ingest.documents{result}` and the `rag.outbox.dead` gauge, refreshed after each poll by one count query, never on scrape);
+  - owns `application.yml` (`gateway.rag.worker.max-attempts` 5, `retry-base` 30s, `retry-max` 10m);
+  - tests in `rag/ingest`. No migration is needed (`lease_until` doubles as the retry time).
 - **Acceptance criteria:**
-  - AC-t11-1: PUT the same document twice → the embedder is called for the first only; the second returns 202 with an "unchanged" marker.
+  - AC-t11-1: PUT the same document twice → the embedder is called for the first only; the second returns 202 with `"status":"unchanged"` and writes no outbox row.
   - AC-t11-2: PUT with changed content → after indexing, no chunk of the old version remains.
-  - AC-t11-3: PUT with the same content and different ACL groups → all chunks carry the new groups.
+  - AC-t11-3: PUT with the same title and content and different ACL groups on an indexed document → 202 `acl_updated`, every chunk carries the new groups at once, and the embedder is not called. On a document still `queued`, the same PUT queues a full job.
   - AC-t11-4: load 300 documents, change 10, load all 300 again → embedder called for exactly 10 documents.
-  - AC-t11-5: two workers polling at once over 50 jobs → each job is processed exactly once.
-  - AC-t11-6: a job whose worker "crashes" (lease expires) is processed by another worker.
-  - AC-t11-7: a job that always fails is marked dead after 5 attempts and the dead-job metric is 1.
-  - AC-t11-8: two quick PUTs of the same document (v1, v2) → final chunks are v2 regardless of job order.
+  - AC-t11-5: two workers polling at once over 50 jobs → each job is processed exactly once (embedder calls and swaps counted).
+  - AC-t11-6: a job whose worker "crashes" (lease expires) is processed by another worker; the first worker's late `markDone` changes nothing (fencing).
+  - AC-t11-7: a job that always fails is retried with growing backoff (asserted on `lease_until`, no sleeps) and marked dead after 5 attempts; `rag.outbox.dead` is 1, the document is `failed`, and a re-PUT of the same content queues it again.
+  - AC-t11-8: two quick PUTs of the same document (v1, v2) → final chunks are v2 whichever job runs first; the v1 job ends `stale_skipped` or its swap returns false.
   - AC-t11-9: during a re-index, a concurrent reader sees only all-old or all-new chunks (test with a paused transaction).
-  - AC-t11-10: DELETE removes the document and all its chunks; a later query does not return them.
+  - AC-t11-10: DELETE removes the document, its chunks and its jobs in one statement; a second DELETE is also 204; a non-admin key gets 403; a RAG query afterwards doesn't return them.
 - Private task notes: Dev A.
 
 ### t12: Chunk-level ACL filtering (Dev B)
 
-**Design.** The ACL predicate is already inside both SQL legs (t10). This task proves and hardens it: a key with no groups short-circuits to "no answer" with no SQL and no provider call; the vector leg's pgvector iterative index scan (on since t10, D-49) is proven to fill the candidate list under a selective filter; a leakage suite checks three levels (retrieved chunk ids, the prompt sent upstream, the citations) and the cache (the RAG cache key contains the prompt, which contains only the caller's chunks). Decisions: C16, C17, D-14.
-- **Owns:** edits `rag/query/ChunkSearchRepository.java`, `rag/query/RagService.java`; uses `gateway.rag.retrieval.iterative-scan` and `max-scan-tuples` from t10 (D-49: iterative scan is on from t10; t12 proves why) instead of a new properties class; tests `RagAclLeakageIT`, `FilteredHnswUnderfillIT`, `AclExplainIT`. Does not touch `application.yml` (defaults in code).
+**Design (D-51).**
+- The ACL predicate has been inside both SQL legs since t10. This task proves and hardens it.
+- **Leakage check:** at four levels: retrieved chunk ids (counted with `AclAudit`, which doesn't trust the retrieval SQL), the prompt sent upstream (WireMock capture), the citations and `sources`, and the cache.
+  - Cache safety comes from the RAG cache key containing the prompt, which contains only chunks the caller retrieved under its own groups. An ACL change therefore can't be bypassed through a cached answer.
+- **Endpoints that return chunk data or metadata:**
+  - `POST /v1/rag/query` (sources, citations, answer);
+  - `GET` document (metadata only, admin only, tenant-scoped). It must give 404 across tenants and 403 for non-admins.
+- **Admin keys** retrieve with their own groups like any key. Admin only governs writes and document metadata (D-49).
+- **Key group changes** take effect within the key cache TTL of 30 s per instance (D-23), the same bound as revocation: accepted and documented (D-51).
+- **Under-fill (AC-t12-5)** is tested at the SQL level, and through the repository with the counted exact fallback (D-49 amendment).
+- Decisions: C16, C17, D-23, D-49, D-50, D-51.
+
+- **Owns:**
+  - edits in `rag/query/**` only, if a fix is needed (`ChunkSearchRepository`, `HybridRetriever`, `RagService`);
+  - tests `RagAclLeakageIT`, `FilteredHnswUnderfillIT`, `AclExplainIT` in `rag/query`;
+  - `src/test/resources/rag/acl-questions.jsonl`: 10 questions whose only relevant fixture documents are restricted, each with the group it needs. t13 adapts these to the real corpus.
+  - Does not touch `application.yml` (defaults in code) or `rag/ingest/**`. AC-t12-7 drives a PUT over HTTP and calls `IndexingWorker.pollOnce()`; it does not edit either.
 - **Acceptance criteria:**
-  - AC-t12-1: a key with group `eng` queries a collection with `eng`, `sre` and `security` documents → every returned chunk's groups include `eng`.
-  - AC-t12-2: for 10 questions whose only relevant documents are restricted, asked with a key lacking the group → 0 restricted chunk ids in retrieval, 0 restricted text in the upstream prompt (WireMock capture), 0 restricted citations.
-  - AC-t12-3: tenant B with a group of the same name as tenant A's gets 0 of tenant A's chunks.
-  - AC-t12-4: a key with an empty group set → the "no answer" response, 0 provider calls.
-  - AC-t12-5: under-fill test: with the HNSW index forced (no sort, no sequential scan) and a filter matching < 5% of ≥ 5,000 chunks as dense clustered vectors (`RagFixtures.near`), the `VECTOR` statement returns the full candidate count with iterative scan on and fewer with it off (both counts recorded); through the repository the result is full either way and the off case increments `rag.retrieval.vector.exact_fallback` (D-49 amendment).
-  - AC-t12-6: `EXPLAIN` of both legs shows the ACL predicate inside the scan, and the test asserts the repository returns no row that was later dropped in Java (no post-filter code path exists).
-  - AC-t12-7: after a PUT that removes a group from a document and the worker run, a key with only that group no longer retrieves it.
+  - AC-t12-1: a key with group `eng` queries a collection with `eng`, `sre` and `security` documents → every returned chunk's groups include `eng` (`AclAudit` returns none).
+  - AC-t12-2: for the 10 questions in `acl-questions.jsonl`, asked with a key lacking the group → 0 leaked chunk ids (`AclAudit`), 0 restricted text in the upstream prompt, 0 restricted citations or sources. Also asked with a key that has the group → the restricted document is retrieved (the test isn't vacuous).
+  - AC-t12-3: tenant B with a group of the same name as tenant A's gets 0 of tenant A's chunks, in both legs and every mode.
+  - AC-t12-4: a key with an empty group set → the "no answer" response, 0 SQL statements (counted on a wrapping DataSource or by the repository fake), 0 provider calls.
+  - AC-t12-5: under-fill test: with the HNSW index forced (no sort, no sequential scan) and a filter matching < 5% of ≥ 5,000 chunks as dense clustered vectors (`RagFixtures.near`), the `VECTOR` statement returns the full candidate count with iterative scan on and fewer with it off (both counts recorded). Through the repository the result is full either way, and the off case increments `rag.retrieval.vector.exact_fallback` (D-49 amendment).
+  - AC-t12-6: `EXPLAIN` of both legs (and of `VECTOR_EXACT`) shows the tenant, collection and ACL predicates inside the scan node (index condition or filter). No post-filter code path exists: the repository returns rows exactly as the database ordered them.
+  - AC-t12-7: after a PUT that removes a group from a document (t11's `acl_updated` path) a key with only that group no longer retrieves it, with no worker run needed. After a content change, the same holds once the worker has run.
   - AC-t12-8: key A (group `security`) and key B (group `eng`) ask the same question; B's response contains no text from security-only chunks, including when A asked first (cache test).
+  - AC-t12-9: `GET` on a document: another tenant's admin → 404, a non-admin key of the same tenant → 403, and no endpoint returns a document's content.
 - Private task notes: Dev B.
 
 ### Integration step (R10)
-Merge t11, then t12 (B rebases on `main` with t11). `./gradlew clean test`; record the AC-t12-5 counts and the leakage count (must be 0) in the round notes.
+Merge t11, then t12 (B rebases on `main` with t11). `./gradlew clean build`. Record the AC-t12-5 counts and the leakage count (must be 0) in the round notes.
 
 ---
 

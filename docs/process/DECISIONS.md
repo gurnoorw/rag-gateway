@@ -87,6 +87,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-48 | t09 review rulings | version-checked chunk swap; bounded heading carry; drain full batches; one prefix definition; worker bean unconditional; Dev A/B choices accepted |
 | D-49 | Retrieval and RAG answer details (t10 prep) | exact OR keyword SQL; ACL/tenant in both legs; `ef_search` 100 + strict iterative scan per query; RRF tie rule; S-labelled delimited prompt through the shared pipeline; no-sources answer without a call; keyword-only degradation; amended: exact re-run when the HNSW pass is short |
 | D-50 | t10 review rulings | 503 `service_unavailable` for an unreachable database or embedder; tag defusing widened (case, width, invisible characters, look-alike brackets); shared label policy; no existence probe; re-index misses the cache |
+| D-51 | Incremental indexing and ACL hardening (R10 prep) | three PUT outcomes under a row lock (unchanged, acl_updated, queued); fenced job updates; retry backoff and dead jobs; idempotent delete; leakage audited independently; key group changes within the 30 s cache TTL |
 
 ---
 
@@ -918,4 +919,42 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - The README limitation now states exactly what is and isn't covered. The exposure stays within a tenant, because only its admin keys write documents.
   - A per-prompt random boundary was rejected: it breaks byte-identical prompts, and so the cache. A content-derived boundary was rejected as well: it adds complexity without stopping prose injection.
 - **README:** the t10 status rows, a `POST /v1/rag/query` example, `service_unavailable` among the codes, and three limitations (prompt injection, retrieval not rate-limited, approximate vector search with an exact fallback).
+
+### D-51. Incremental indexing and ACL hardening (R10 prep: t11, t12)
+- **Context:** t09 re-indexes every PUT, retries a failed job on the next poll forever, and has no delete. t10 put the ACL predicate in SQL, but nothing yet audits it independently. Earlier rulings fix the rest of the frame:
+  - the hash covers title, content and sorted groups (D-47);
+  - the swap writes only the version the locked row holds (D-48);
+  - delivery is at-least-once, and the worker drains backlogs (D-48);
+  - the vector leg has an exact fallback (D-49 amendment).
+- **PUT outcomes (t11)**, decided under `SELECT … FOR UPDATE` on the existing row:
+  - **unchanged:** same hash and status `queued` or `indexed`. No outbox row, no embedding.
+  - **acl_updated:** same title and content, different groups, status `indexed`. Document and chunk groups are updated in the same transaction; no job.
+  - **queued:** everything else, including re-PUTting a `failed` document, which is how a dead job is retried.
+  - Why the ACL fast path:
+    - a permission change is common (team changes) and content-free, and re-embedding a whole collection for it costs minutes per hundred documents on a laptop model;
+    - updating chunk groups in the same transaction makes the change visible at once, which is also the safer direction when access is removed.
+  - Why only on `indexed`: if a content job is still pending, its chunks are an older version. Taking the fast path would move the hash to the new groups, the pending job would then be stale-skipped, and the newer content would never be indexed. So that case queues a full job.
+  - The row lock serialises the PUT with a concurrent swap, which locks the same row.
+  - Rejected:
+    - always re-embed on a group change (correct, but slow for no gain);
+    - a read-then-write without a lock (two concurrent PUTs could both decide "unchanged" from a stale read).
+- **Retries and dead jobs (t11):**
+  - `release` keeps a job `PENDING` and sets `lease_until` to the retry time: 30 s × 2^(attempts−1), at most 10 min. The claim skips `PENDING` rows whose `lease_until` is still ahead, so no migration is needed.
+  - After 5 attempts (about 7.5 min, enough to ride out an Ollama restart) the job is `DEAD`. The document is `failed` only if it still holds that job's hash (otherwise a newer job owns it).
+  - Counted as `rag.ingest.documents{result=dead}`. `rag.outbox.dead` is a gauge refreshed by the worker after each poll with one count query, so a scrape never hits the database. A non-zero gauge is the alert.
+  - Rejected: immediate retry on the next poll, which with t09's behaviour burns all attempts in about 5 s of an outage.
+- **Fencing (t11):** `markDone`, `release` and `markDead` change a row only `WHERE id = ? AND attempts = ?`, the attempt number the claim returned.
+  - Two workers can hold the same job only after a lease expired, and then the stale one's updates touch nothing.
+  - Together with `SKIP LOCKED` on the claim and the version-checked swap, no job is processed twice in the normal case, and a duplicate after a lease expiry is harmless.
+- **Delete (t11):** `DELETE` on the document URL with an admin key. One statement deletes the document; chunks and jobs cascade, so readers see the document's chunks or none.
+  - Always 204: idempotent, and it reveals nothing across tenants.
+  - An in-flight job finds no document and ends harmlessly (D-48 swap returns false; the fenced `markDone` touches 0 rows).
+- **Leakage audit (t12, t13):** `AclAudit.leakedChunkIds` re-derives visibility from the chunk rows (tenant, collection, groups, existence) for any list of shown chunk ids. It doesn't reuse the retrieval predicates, so a bug in them can't hide itself.
+  - The t12 suite checks four levels: ids, upstream prompt, citations and sources, and cache.
+  - t13 runs the same audit on the real corpus with its ACL questions; the eval source set sees main code, so the audit lives in main and is never called on a request path.
+- **Cache and ACL changes:** the RAG cache key holds the prompt, built from what the caller retrieved under its current groups. After a group is removed, the caller retrieves different chunks, builds a different prompt and gets a different key, so a cached answer can't outlive a permission change. A caller who still has access may get a cached answer over unchanged text, which is correct.
+- **Key group changes:** they apply within the key cache TTL, 30 s per instance (D-23), the same bound as revocation. Accepted: groups change on human timescales.
+  - Instant revocation would need an invalidation broadcast (Redis pub/sub) or no cache (a database read per request). Neither is justified now. Documented as a limitation.
+- **Admin keys:** retrieve with their own groups. "Admin" only governs writes and document metadata (D-49). A tenant-wide reader would be a separate, explicit group.
+- **Ownership:** t11 edits only `rag/ingest/**` and `application.yml`; t12 edits only `rag/query/**`. Shared code (`support/`, `metrics/`, `auth/`, `error/`, migrations) is frozen for the round. t11 merges first.
 

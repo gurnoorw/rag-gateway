@@ -1,8 +1,10 @@
 # Release runbook: from a fresh laptop to v1.0
 
-The steps that need the target laptop (8 GB MacBook Air), real models or an Anthropic API key, in order. Each step has the exact command and what "done" looks like. Everything else is already measured, tested and checked in the build environment (DECISIONS.md D-21, D-55).
+The steps that need the target laptop (8 GB MacBook Air), real models or an Anthropic API key, in order. Each step has the exact command and what "done" looks like. Everything else is already measured, tested and checked in the build environment ([DECISIONS.md](process/DECISIONS.md) D-21, D-55).
 
 Run from the repository root. Secrets go in `.env` (gitignored, copied from `.env.example`) and are never committed. Commands that read `.env` assume it is exported in the shell, e.g. `set -a; . ./.env; set +a`.
+
+Steps 3 and 4 write files meant for committing, and both refuse to run on a tree with uncommitted changes (a results file names the commit that produced it). Commit or stash first; `--allow-dirty` exists for probes only and writes under the gitignored `bench/results/` or `build/eval/`.
 
 ## 0. Prerequisites
 
@@ -49,7 +51,7 @@ Stop `bootRun` first: the harness starts its own gateway at `-Xmx512m` and the m
 bash bench/run-all.sh --measured-on "8 GB MacBook Air"
 ```
 
-Done when `bench/summary/<run_id>.json` exists. Commit it; the laptop rows are added in step 7.
+Done when `bench/summary/<run_id>.json` exists and its `measured_on` is `8 GB MacBook Air`. Commit it; the README rows are filled in step 7.
 
 ## 4. Retrieval and ACL eval with real embeddings
 
@@ -59,25 +61,28 @@ App running again (step 1), corpus loaded.
 ./gradlew eval --args="retrieval --modes keyword,vector,hybrid --embedder nomic-embed-text --measured-on '8 GB MacBook Air'"
 ```
 
-Done when `eval/results/<run_id>.json` is written with 9 retrieval rows and an `acl` section in hybrid mode. Check that `unauthorised_leaked_chunks` is 0. Never run `--embedder fake` into tenant `eval`; it defaults to `eval-fake`, so leave the default.
+Done when `eval/results/<run_id>.json` is written with 9 retrieval rows and an `acl` section in hybrid mode, and the command exits 0 (it exits 1 when any chunk leaked). Check that `unauthorised_leaked_chunks` is 0. Never run `--embedder fake` into tenant `eval`; it defaults to `eval-fake`, so leave the default. The question set and metrics are described in [eval/README.md](../eval/README.md).
 
 ## 5. Answer eval: collect, dry run, calibration, judge
 
+App running (step 1). `collect` asks the RAG endpoint with the `eval` tenant's key from step 1, read from `EVAL_GATEWAY_API_KEY`; the judge reads only `EVAL_JUDGE_API_KEY`.
+
 ```bash
-./gradlew eval --args="answers collect --out build/eval/answers.jsonl"
+set -a; . ./.env; set +a
+./gradlew eval --args="answers collect --questions eval/questions.v1.jsonl --out build/eval/answers.jsonl"
 ./gradlew eval --args="answers score --answers build/eval/answers.jsonl --dry-run"
 ```
 
-Done when `collect` wrote one line per non-ACL question and the dry run's "estimated worst-case cost" is under the cap in `eval/judge/judge.properties`.
+Done when `collect` wrote one line per non-ACL question and the dry run's "estimated worst-case cost" is under the cap in [`eval/judge/judge.properties`](../eval/judge/judge.properties).
 
-Calibration: before running the judge, write `eval/judge/calibration.jsonl` with 10 answers you graded yourself (0 wrong, 1 partly, 2 correct; the format is in `eval/README.md`).
+Calibration: before running the judge, write `eval/judge/calibration.jsonl` with 10 answers from `build/eval/answers.jsonl` that you graded yourself, one `{"id": "q01", "correctness": 2}` per line (0 wrong, 1 partly right, 2 correct; the rubric is [eval/judge/rubric.md](../eval/judge/rubric.md)).
 
 ```bash
 ./gradlew eval --args="answers score --answers build/eval/answers.jsonl --confirm-spend \
     --calibration eval/judge/calibration.jsonl --into eval/results/<run_id from step 4>.json"
 ```
 
-Done when the command reports "scored N of M", the spend under the cap and the agreement with your labels. If agreement is low, fix the rubric or prompt and re-run before publishing any answer score.
+Done when the command reports "scored N of M", the spend under the cap and the agreement with your labels, and the step-4 results file now has an `answers` section (the command refuses a file that already has one). Commit the results file and the calibration labels. D-55 recommends publishing answer scores only with an agreement of at least 8 of 10 (owner decision 3); below that, fix the rubric or prompt and re-run, or leave the answer rows pending with the agreement stated.
 
 ## 6. Grafana screenshot
 
@@ -86,20 +91,24 @@ docker compose --profile obs up -d
 bash scripts/check_obs.sh
 ```
 
-With the app taking traffic (for example `scripts/demo.sh` against the mock profile, or a few RAG queries), capture the `rag-gateway` dashboard at http://localhost:3000 as `docs/img/grafana-dashboard.png`.
+With the app taking traffic (for example `scripts/demo.sh` against the mock profile, or a few RAG queries), capture the `rag-gateway` dashboard ([`ops/grafana/dashboards/rag-gateway.json`](../ops/grafana/dashboards/rag-gateway.json)) at http://localhost:3000 as `docs/img/grafana-dashboard.png`.
 
-Done when `check_obs.sh` passes and the image is committed.
+Done when `check_obs.sh` passes and the image is committed. The README links it in step 7; the line to paste is in [docs/img/README.md](img/README.md).
 
 ## 7. README numbers
 
-Add the laptop benchmark rows from step 3 and the eval rows from steps 4–5. Every value is copied from its results file, with the labels "8 GB MacBook Air" and `nomic-embed-text`. Then:
+Fill the README from the files of steps 3–5, copying each value by hand (D-55 rejects auto-filling, so a person looks at every number):
+- **Measured table:** each row ending in "laptop" gets the value from `bench/summary/<run_id>.json` at its Source key, Measured on `8 GB MacBook Air` (the file's `measured_on`, exactly) and the Run id. Other laptop rows may be added the same way; the container rows stay.
+- **Eval table:** each "pending laptop run" row gets the value, the file's `measured_on` and the Run id from `eval/results/<run_id>.json`; Embedder stays `nomic-embed-text`.
+- **Dashboard:** add the image line from step 6 to the Dashboard section.
+- Rewrite any prose that says a row is pending or not yet measured (S6b, the eval notes, Status, Limitations).
 
 ```bash
 python3 scripts/check_readme_numbers.py
 python3 scripts/check_readme_numbers.py --release
 ```
 
-Done when both pass. `--release` fails on any "pending" cell that `docs/process/release-pending-allowlist.txt` doesn't name.
+Done when both pass. `--release` fails on any "pending" cell whose Metric text [`docs/process/release-pending-allowlist.txt`](process/release-pending-allowlist.txt) doesn't name; to ship with a cell still pending, add its Metric text to that file, one per line, and commit it (owner decision 2 in D-55). Both modes also fail on a relative link or image in the README or this runbook that does not resolve to a committed file.
 
 ## 8. Release checks, version, tag
 

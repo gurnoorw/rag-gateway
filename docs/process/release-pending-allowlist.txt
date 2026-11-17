@@ -1,0 +1,7 @@
+# Pending README cells allowed at release (D-55, owner decision 2).
+#
+# `python3 scripts/check_readme_numbers.py --release` fails on every "pending" Value cell in the README's measured
+# or eval table whose Metric text is not a line of this file. Copy the Metric cell exactly, one per line.
+# Blank lines and lines starting with '#' are ignored.
+#
+# Empty by default: shipping without a number is a choice the owner makes here, row by row.

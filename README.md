@@ -1,10 +1,12 @@
 # rag-gateway
 
-An LLM gateway with an OpenAI-compatible `POST /v1/chat/completions` endpoint, built in Java 21 and Spring Boot 3. A RAG endpoint on top of it (`POST /v1/rag/query`) answers questions from indexed documents through the same pipeline; ACL hardening and the retrieval evaluation are still to come (see [Status](#status)).
+An LLM gateway with an OpenAI-compatible `POST /v1/chat/completions` endpoint, built in Java 21 and Spring Boot 3, with a RAG endpoint on top (`POST /v1/rag/query`) that answers questions from a tenant's documents, with citations, through the same pipeline. Every measured number in this README is read from a committed results file and checked by a script; design targets are labelled as such, and what has not been measured yet says so.
 
 ## What it is
 
 One service between applications and LLM providers, so that limits, failures, cost and keys are handled once instead of in every app. An app switches to it by changing its OpenAI base URL.
+
+**Why a gateway.** Every app that calls a provider needs the same things: limits counted in tokens per tenant, a budget, cost attribution, retries and a fallback when the provider fails, a cache, and metrics. Built once, they behave the same for every caller and show up on one dashboard; built in each app, they drift. **Why RAG on top of it.** A retrieval answer is a chat request with sources in the prompt, so it pays the same limits and budget, lands in the same cost log and gets the same fallback without new code; document access control is enforced in one place, in the SQL that retrieves chunks, per API key.
 
 On every chat request the gateway:
 
@@ -17,16 +19,23 @@ On every chat request the gateway:
 - validates the output against the caller's JSON schema when one is given;
 - streams the answer as OpenAI-style SSE, then writes one cost row per request to Postgres and records Prometheus metrics.
 
+On the RAG side it:
+
+- ingests documents asynchronously (`PUT` saves the document and an outbox job in one transaction; a worker chunks, embeds with `nomic-embed-text` into pgvector and swaps the chunks in);
+- retrieves with two legs, Postgres full-text and pgvector, fused by reciprocal rank fusion, with the tenant, collection and the key's ACL groups inside both SQL queries;
+- answers through the chat pipeline above, with citations mapped back to chunks, and no model call when no visible chunk matches.
+
 ### Status
 
 | Part | State |
 |---|---|
 | Gateway path (t01–t07): auth, rate limit, budget, cost log, fallback, metrics, cache, routing, output validation | Built and tested (JUnit 5 + Testcontainers, WireMock providers) |
-| Benchmarks (t08) | k6 harness against WireMock mocks; one committed run on a cloud container (see [Measured](#measured)); laptop run pending |
-| RAG ingestion (t09): document API, outbox, chunking, embeddings into pgvector | Built and tested; embeddings here come from a deterministic fake (Ollama is not reachable in the build environment), the Ollama adapter is tested against WireMock |
-| RAG query (t10): hybrid retrieval (Postgres full-text + pgvector, reciprocal rank fusion), answers with citations through the chat pipeline | Built and tested against WireMock providers and the fake embedder; no retrieval-quality numbers yet |
+| Benchmarks (t08) | k6 harness against WireMock mocks; one committed run on a cloud container (see [Measured](#measured)); laptop rows pending |
+| RAG ingestion (t09): document API, outbox, chunking, embeddings into pgvector | Built and tested; embeddings in the build environment come from a deterministic fake (Ollama is not reachable there), and the Ollama adapter is tested against WireMock |
+| RAG query (t10): hybrid retrieval (Postgres full-text + pgvector, reciprocal rank fusion), answers with citations through the chat pipeline | Built and tested against WireMock providers and the fake embedder; retrieval quality is in [Retrieval eval](#retrieval-eval) |
 | RAG hardening (t11–t12): incremental indexing (unchanged, groups-only and changed PUTs), retries with backoff and dead jobs, DELETE, chunk-level ACL leakage suite | Built and tested (fake embedder; leakage suite at 0 leaked chunks) |
-| RAG evaluation (t13): retrieval recall@k / MRR / nDCG, ACL leak check, capped answer judge | Harness built and tested; keyword-only retrieval measured here (table below); vector, hybrid and answer scores pending the laptop run with `nomic-embed-text` and a real judge |
+| RAG evaluation (t13): retrieval recall@k / MRR / nDCG, ACL leak check, capped answer judge | Harness built and tested; keyword-only retrieval measured (see [Retrieval eval](#retrieval-eval)); vector, hybrid and answer scores pending the laptop run with `nomic-embed-text` and a real judge |
+| Release (t14): README number, link and release checks; release runbook | Checks built and tested; the steps that need the laptop, real models or an API key are in the [release runbook](docs/RUNBOOK.md) |
 
 ## Quickstart
 
@@ -95,6 +104,39 @@ flowchart LR
 6. **Router.** Per provider: `Retry(CircuitBreaker(call))`, retrying only before the first token with full-jitter backoff; on a retryable failure or an open breaker, the next provider in the chain. Timeouts (connect, first token, idle gap) live in the adapters.
 7. **Output validation.** With a schema, each router call is buffered, checked (schema, truncation, refusal), retried once, and sent as one burst or a 502 `invalid_model_output`. Without one, tokens stream straight through; a structural check per attempt turns an empty `stop` answer into a retryable failure.
 8. **Response, log, metrics.** SSE or JSON to the client with `X-Request-Id`, `X-Gateway-Provider`, `X-Gateway-Model`, `X-Gateway-Cache`. After the response is closed, one `request_log` row (tokens, cost, provider, cache status, attempts) and the request metrics.
+
+### RAG path
+
+```mermaid
+flowchart LR
+    writer["Admin key<br/>PUT document"]
+    asker["Any key<br/>POST /v1/rag/query"]
+
+    subgraph gw["rag-gateway"]
+        direction LR
+        docapi["Document API<br/>admin and size checks"]
+        worker["Indexing worker<br/>chunk, embed, swap"]
+        rag["RAG service<br/>keyword and vector legs,<br/>RRF fusion, prompt"]
+        pipe["Chat pipeline<br/>(as above)"]
+    end
+
+    pg[("Postgres + pgvector<br/>documents, outbox,<br/>chunks with tenant and groups")]
+    emb["Ollama<br/>nomic-embed-text"]
+
+    writer --> docapi
+    docapi -->|"document and outbox row,<br/>one transaction"| pg
+    worker -->|"claim job with a lease,<br/>then replace chunks"| pg
+    worker -->|"embed chunks"| emb
+    asker --> rag
+    rag -->|"embed question"| emb
+    rag -->|"full-text and HNSW search,<br/>tenant and groups in SQL"| pg
+    rag -->|"sources S1..Sk"| pipe
+```
+
+1. **Write.** An admin key `PUT`s a document; the size and admin checks run before the body is read. The document row and an outbox job are written in one transaction and the call returns 202 `queued` (C4, D-47). An unchanged document is skipped, and a groups-only change applies at once without re-embedding (D-51).
+2. **Index.** The worker claims jobs with a lease, splits each document by headings, then paragraphs, then sentences, embeds the chunks in batches with no transaction or connection held, and swaps the document's chunks in one transaction. A failing job is retried with backoff and then marked dead (D-47, D-51).
+3. **Retrieve.** The keyword leg (Postgres full-text, OR between the stemmed terms, ranked by `ts_rank_cd`) starts at once; the question is embedded in parallel and the vector leg (pgvector HNSW with iterative scan, exact fallback when the index under-fills) follows. Both legs filter by tenant, collection and the key's groups inside the SQL, and the two ranked lists are fused by reciprocal rank fusion (C17–C19, D-49).
+4. **Answer.** The top chunks go into the prompt as delimited sources `S1..Sk`, and the question runs as a non-streaming chat request through the pipeline above: cache, limits, budget, routing, fallback and the cost log apply unchanged. Cited labels are mapped back to chunk ids; invented ones are dropped (D-49, D-50).
 
 ## API examples
 
@@ -184,7 +226,7 @@ Every value below is read from a committed run file, `bench/summary/<Run>.json`,
 
 How to read it:
 
-- **Hardware.** "cloud container, 4 vCPU / 15 GB" ran the gateway, the WireMock mocks, Redis, Postgres and k6 on the same host, sharing its CPUs. That inflates latency and caps throughput, so these numbers say what the gateway adds on that machine, not how it behaves against real providers (the mocks have fixed latency and never rate-limit). Laptop runs are added as their own rows by the owner and replace nothing; none exists yet.
+- **Hardware.** "cloud container, 4 vCPU / 15 GB" ran the gateway, the WireMock mocks, Redis, Postgres and k6 on the same host, sharing its CPUs. That inflates latency and caps throughput, so these numbers say what the gateway adds on that machine, not how it behaves against real providers (the mocks have fixed latency and never rate-limit). The rows ending in "laptop" are the headline metrics of the run on the target laptop; they read "pending laptop run" with no number until that run's file is committed, and then sit next to the container rows, replacing nothing ([release runbook](docs/RUNBOOK.md), step 3).
 - **Setup.** App with `-Xmx512m` and virtual threads; k6 `grafana/k6:2.3.0` with an open arrival-rate model for latency scenarios and a closed model for open streams (D-45). The mocks send the first chunk (holding the first token) after a fixed delay and the rest over about a second; the run file's `setup.mock_latency` has the exact shape.
 - **Percentiles.** "k6 client-side" percentiles are computed by k6 from every request. "bucket edges" percentiles come from a Prometheus histogram and are interpolated inside the bucket that holds them (D-38), so they are estimates; the row lists the edges.
 - **Added latencies are differences of percentiles**, not percentiles of differences: "p99 added" is the gateway leg's p99 minus the comparison leg's p99. Tails are noisy on a shared host, and the differences need not grow from p50 to p99.
@@ -256,6 +298,18 @@ How to read it:
 | S7b Headers delayed: fallback success rate | 100.0 | % | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.fallback_success_rate` |
 | S7b Headers delayed: peak heap used | 484.4 | MB | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.peak_heap_used_mb` |
 | S7b Headers delayed: peak virtual threads (thread dump every 2 s) | 2,004 | threads | cloud container, 4 vCPU / 15 GB | 20261116T2232Z-cloud-container-4-vcpu-15-gb | `scenarios.open_streams.headers_delayed.peak_virtual_threads` |
+| S1 Added latency seen by the client, time to first byte, p50 (gateway minus direct, k6 client-side), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p50` |
+| S1 Added latency seen by the client, time to first byte, p99 (gateway minus direct, k6 client-side), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.overhead.added_latency_seen_by_client_ms.ttfb.p99` |
+| S1 Gateway processing overhead, p99 (`gateway_overhead_seconds`, bucket edges 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000 ms), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.overhead.gateway_processing_overhead_ms.p99` |
+| S8 Request-log insert, p99 (`gateway_requestlog_write_seconds`, bucket edges 0.5, 1, 2, 5, 10, 25, 50, 100 ms), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.log_insert.p99_ms` |
+| S2 Cache-hit latency, total time, p99 (k6 client-side), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.cache_hit_latency.p99_ms` |
+| S3 Cache hit rate: measured, laptop | pending laptop run | % | 8 GB laptop (not run yet) | | `scenarios.cache_hit_rate.measured_hit_rate` |
+| S5 Fallback: success rate after the kill, laptop | pending laptop run | % | 8 GB laptop (not run yet) | | `scenarios.fallback.success_rate_after_kill` |
+| S6 Rate limit: share answered correctly, laptop | pending laptop run | % | 8 GB laptop (not run yet) | | `scenarios.rate_limit.share_correct` |
+| S6b Redis refused from start, with the skip window: added latency, p99 (vs scenario 1, k6 client-side), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.redis_down_from_start.refused.added_ms.p99` |
+| S6b Redis black-holed from start, with the skip window: added latency, p99 (vs scenario 1, k6 client-side), laptop | pending laptop run | ms | 8 GB laptop (not run yet) | | `scenarios.redis_down_from_start.blackholed.added_ms.p99` |
+| S6b Redis black-holed from start, with the skip window: errors (not completed), laptop | pending laptop run | errors | 8 GB laptop (not run yet) | | `scenarios.redis_down_from_start.blackholed.errors` |
+| S7 Open streams: largest N with zero errors (`-Xmx512m`), laptop | pending laptop run | streams | 8 GB laptop (not run yet) | | `scenarios.open_streams.max_n_zero_errors` |
 <!-- measured:end -->
 
 Notes on the rows:
@@ -268,6 +322,10 @@ Notes on the rows:
 - **S6b, Redis unavailable from the start** (decides the D-17 skip window). *Refused*: the median adds little, but p95 and p99 are much higher than p50. *Black-holed* (connections time out with no answer): most requests never completed, they ended at k6's request timeout, so the added-latency values are **lower bounds** capped by that timeout, and k6 could not hold the arrival rate (it dropped scheduled arrivals for lack of free virtual users). The black-holed rows show that a black-holed Redis made the gateway unusable without a skip window. **The skip window was added after this run** (D-46: after a Redis failure every Redis user skips Redis for a second, then one request probes), so these rows describe the code before it; the next run re-measures them, and no new figures are given here until then.
 - **S7, open streams.** Closed model: N virtual users each holding one ~5 s stream at a time, app at `-Xmx512m`. The largest step with zero errors is the one in the table; the next step (twice as many streams) ran out of heap (`OutOfMemoryError`), every stream in it failed, and its heap and thread peaks could not be sampled, so it has no rows. From N = 1000 up the peak heap sits close to the 512 MB limit, so heap, not threads, is what bounds this step size. Since this run the gateway sheds load instead of running out of heap: each instance serves at most `gateway.max-in-flight` concurrent `/v1` requests (a configured limit derived from this run, not a measurement) and answers the next one with 503 `overloaded` and `Retry-After: 1` (D-46). Peak heap is sampled every 0.5 s; peak virtual threads come from a thread dump every 2 s (`jvm_threads_live` counts platform threads only), so short peaks between dumps are missed. Pinning reports (`-Djdk.tracePinnedThreads=short`) appeared only right after startup, all in a lazy initializer inside the provider SDK (`kotlin.SynchronizedLazyImpl.getValue`), not in steady-state streaming.
 - **S7b, headers delayed.** The Claude mock holds its response headers past the first-token timeout; every request was answered by the Ollama fallback, and the abandoned Claude calls (D-37 c) stayed within the heap at this N.
+
+### Dashboard
+
+The Grafana dashboard ([`ops/grafana/dashboards/rag-gateway.json`](ops/grafana/dashboards/rag-gateway.json), provisioned by the `obs` compose profile) shows requests by tenant and status, rejections by reason, total latency, time to first token and gateway overhead, tokens and cost by tenant, breaker state, retries and fallbacks, rate-limit fail-open, cache hit ratio, request-log write failures, and for RAG the indexing outcomes, dead jobs and exact vector-search fallbacks. A screenshot taken during the laptop run will be shown here from `docs/img/grafana-dashboard.png` ([release runbook](docs/RUNBOOK.md), step 6); until that file is committed, no image is linked.
 
 ## Retrieval eval
 
@@ -345,6 +403,13 @@ Reproduce: load the corpus (`scripts/corpus/load_corpus.py`), then run `./gradle
 | Output validation vs streaming | Buffer only when a schema is given; one retry; 502 after | Validate after streaming (bad output already sent); JSON repair (hides model errors) | C8, D-43 |
 | Cost logging | One insert per request after the response is closed | In-memory batch buffer (loss window and shutdown draining for no measured need yet) | C7 |
 | Concurrency model | Spring MVC on virtual threads, blocking code | WebFlux end to end (harder to write and debug for the same I/O-bound scaling) | D-03 |
+| Overload | Per-instance in-flight limit, then a fast 503 `overloaded` with `Retry-After` | Admitting everything (the heap runs out and every stream fails) | D-46 |
+| Ingestion | Asynchronous: the document and an outbox job in one transaction, a worker embeds | Embedding inside the `PUT` (a slow or down model holds the request and its connection) | C4, D-47 |
+| Chunk size | Structure-aware chunks (headings, paragraphs, sentences) with sentence overlap; three target sizes compared by recall@k | Picking a size by intuition: small chunks are precise but lose context, large ones keep context but dilute the match, so it is measured | D-47, D-53 |
+| ACL filter | Pre-filter: tenant, collection and the key's groups inside both SQL legs, with HNSW iterative scan and an exact fallback when the index under-fills | Post-filter in Java (a top-k cut before the filter returns too few rows, and one missed check leaks); one collection per tenant by naming convention | C17, D-49, D-51 |
+| Keyword leg | Postgres full-text, OR between the stemmed terms, `ts_rank_cd` ranking (not BM25) | AND semantics (most questions match nothing and hybrid silently becomes vector-only); a BM25 extension (more moving parts for this corpus) | C18, C19 |
+| Fusion | Reciprocal rank fusion over the two ranked lists | Normalising and adding scores (full-text rank and cosine distance are not on comparable scales) | D-49 |
+| Answer scoring | Deterministic checks for refusals and citations; an LLM judge with a spend cap, published only with its agreement against hand labels | Judging everything with the LLM (refusals are checkable exactly and for free); a larger judge model | D-53 |
 
 ## Limitations
 
@@ -366,18 +431,42 @@ Reproduce: load the corpus (`scripts/corpus/load_corpus.py`), then run `./gradle
 - **Answer scores will come from an LLM judge (D-53).** A small model grades each answer against the gold passage on a fixed rubric. It can favour long or confident answers and is not deterministic (no sampling controls on that model), so a judge score is published only with its agreement against 10 hand-labelled answers. Unanswerable questions are checked without the judge.
 - **The benchmark measures the gateway against mocks**, with load generator, mocks and gateway on one host (D-45). It says nothing about real provider latency or provider-side rate limits.
 
+## Next steps
+
+Design-level follow-ups recorded in the decision log, none of them built:
+
+- **Fewer bytes per open stream (D-46).** Attribute the heap each open stream holds with an allocation profile at the S7 step size, then act on it (a shared JSON buffer pool instead of one per virtual thread, one virtual thread per Claude stream). Until then the in-flight limit sheds load before the heap runs out.
+- **Re-measure Redis unavailability (D-46).** The S6b container rows predate the skip window, so its effect has no number yet; the pending laptop rows measure the code with it.
+- **Vector index per tenant or collection (D-49).** One shared HNSW index lets one tenant's vectors affect another's recall and latency; frequent exact fallbacks are the signal to partition.
+- **Keyword ranking with IDF (C18, D-54).** `ts_rank_cd` weighs a frequent word like a rare one; one of the keyword misses checked by hand is a ranking miss of exactly that kind. A BM25-style ranker is the next step if the hybrid numbers show the keyword leg holding recall back.
+- **Request log at scale (C7, C9).** Batched inserts (or `COPY`) at the design rate, and partitions by day so retention is a partition drop rather than a `DELETE`.
+- **Limits beyond tokens (C3, D-47, D-49).** A request-count limit in front of the cache, a retrieval-only limit, and per-tenant limits on document writes; today these are bounded only per instance.
+- **Per-tier prices (D-08).** Price tables with tiers by prompt size, so long prompts are costed as billed.
+- **Retry inside a buffered schema call (D-43).** Reset the buffer per router attempt, so a provider failure mid-call can fall back instead of returning 502.
+- **A second layer against prompt injection (D-49, D-50).** Delimiting sources and defusing tags reduce injection from documents but cannot stop a chunk that argues in plain prose; output filtering or a second model check is the next layer.
+- **Outbox pruning (D-52).** Completed jobs are kept; a periodic prune keeps the outbox small.
+- **A larger, independently written eval set (D-53, D-54).** Questions written by people who did not build the system, so the eval measures more than a regression baseline.
+- **Spring Boot 4 (D-02)**, after v1.0.
+
 ## How to reproduce
 
 ```bash
 ./gradlew clean build                                                   # unit + integration tests (Docker needed)
 bash bench/run-all.sh --measured-on "<hardware label>"                  # all scenarios; writes bench/summary/<run_id>.json
-python3 scripts/check_readme_numbers.py                                 # README measured table == run files
+./gradlew eval --args="retrieval --modes keyword --measured-on '<hardware label>'"  # corpus loaded; writes eval/results/<run_id>.json
+python3 scripts/check_readme_numbers.py                                 # README tables == result files; relative links resolve
 bash scripts/quickstart_check.sh && bash scripts/check_mermaid.sh        # clean clone; needs the default ports free
 bash scripts/demo.sh                                                    # with the mock stack and the app running
 python3 -m unittest discover -s scripts/tests -v                        # tests of the checks themselves
 ```
 
 `--measured-on` is required and has no default, so a run cannot be mislabelled. Raw k6 output stays in the gitignored `bench/results/`; the summary file is committed. The observability stack (`docker compose --profile obs up -d`) adds Prometheus and Grafana with the dashboard in `ops/grafana/dashboards/`.
+
+## Release
+
+The steps that need the target laptop, real models or a provider API key (the laptop benchmark, the retrieval eval with `nomic-embed-text`, the judged answer eval with its calibration, the dashboard screenshot and a live Claude check) are in the [release runbook](docs/RUNBOOK.md), each with its command and a checkable "done".
+
+`python3 scripts/check_readme_numbers.py --release` adds one rule to the normal check: every "pending" cell in the measured and eval tables blocks the release unless its Metric text is a line of [`docs/process/release-pending-allowlist.txt`](docs/process/release-pending-allowlist.txt). The file names nothing by default, so shipping without a number is an explicit, reviewable choice (D-55). `bash scripts/release_check.sh` runs that check with the other release checks (fresh-clone build, history secrets scan, decision index, Mermaid, licence, version and changelog, wording). The repository has no licence file yet: choosing one is an open decision (D-55), and the release check fails until it exists.
 
 ## Demo corpus
 
@@ -389,5 +478,8 @@ The RAG demo indexes documentation from [kubernetes/website](https://github.com/
 - [High-level design](docs/HLD.md): requirements, estimates, API, deep dives
 - [Low-level design](docs/LLD.md): classes, filter chain, limiter, breaker, router, cache
 - [Concepts and trade-offs](docs/CONCEPTS.md)
-- [Architecture decisions](docs/process/DECISIONS.md): every choice with its rejected alternative
-- [Work plan](docs/process/WORK_PLAN.md) and [team rules](docs/process/TEAM_RULES.md)
+- [Architecture decisions](docs/process/DECISIONS.md): every choice with its rejected alternative, including where it overrides the documents above
+- [Work plan](docs/process/WORK_PLAN.md): the task plan t00–t14 with every acceptance criterion
+- [Team rules](docs/process/TEAM_RULES.md): branches, tests, ownership, public wording
+- [Release runbook](docs/RUNBOOK.md): the laptop, real-model and release steps, each with a checkable "done"
+- [Eval set and method](eval/README.md): questions, gold passages, metrics, the judge

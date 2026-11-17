@@ -1,4 +1,5 @@
-"""Tests for scripts/check_readme_numbers.py (t08, AC-t08-2, -3, -4; t13 eval table, D-53, AC-t13-5).
+"""Tests for scripts/check_readme_numbers.py (t08, AC-t08-2, -3, -4; t13 eval table, D-53, AC-t13-5; t14 release
+mode and link check, D-55, AC-t14-3, AC-t14-10).
 
 Run: python3 -m unittest discover -s scripts/tests -v
 
@@ -8,8 +9,10 @@ Fixtures under scripts/tests/fixtures/ are test data, not a measurement: the sum
 """
 import io
 import json
+import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -312,6 +315,200 @@ class CheckReadmeNumbersTest(unittest.TestCase):
         self.assertIsNone(crn.parse_key("retrieval[mode=keyword,,x=1].mrr"))
         self.assertEqual("0.429", crn.expected_text(0.4285, "fraction", crn.EVAL_UNITS))
         self.assertEqual("21.4", crn.expected_text(0.2135, "%", crn.EVAL_UNITS))
+
+    # ------------------------------------------------------------ release mode (t14, D-55, AC-t14-3)
+
+    # The fixture's pending rows: two in the measured table, two in the eval table.
+    PENDING_METRICS = [
+        "Cache-hit p99 (k6 client-side)",
+        "Log insert p99 (bucket edges 0.5, 1, 2, 5 ms)",
+        "Recall@5, hybrid, 400 tokens",
+        "Answers correct",
+    ]
+
+    def run_release(self, allowlist_lines, readme_text=None):
+        allowlist = self.tmp / "allowlist.txt"
+        allowlist.write_text("".join(line + "\n" for line in allowlist_lines), encoding="utf-8")
+        readme = self.tmp / "README.md"
+        readme.write_text(self.readme_text if readme_text is None else readme_text, encoding="utf-8")
+        out = io.StringIO()
+        code = crn.check(readme, self.summary_dir, SCHEMA, out=out, results_dir=self.results_dir,
+                         results_schema_path=RESULTS_SCHEMA, release=True, allowlist_path=allowlist)
+        return code, out.getvalue()
+
+    def test_ac_t14_3_release_fails_on_every_pending_cell_with_an_empty_allowlist(self):
+        code, out = self.run_release(["# names nothing"])
+        self.assertEqual(1, code, out)
+        for metric in self.PENDING_METRICS:
+            self.assertIn(f"blocks the release: '{metric}'", out)
+        self.assertIn("pending measured cell", out)
+        self.assertIn("pending eval cell", out)
+        self.assertIn("release mode: 4 pending cell(s), 0 on the allowlist, 4 blocking", out)
+
+    def test_ac_t14_3_release_fails_on_the_one_pending_cell_left_off_the_allowlist(self):
+        code, out = self.run_release(self.PENDING_METRICS[:3])
+        self.assertEqual(1, code, out)
+        self.assertIn("blocks the release: 'Answers correct'", out)
+        self.assertEqual(1, out.count("blocks the release"), out)
+
+    def test_ac_t14_3_release_passes_when_every_pending_cell_is_listed(self):
+        code, out = self.run_release(["# owner decision, D-55", ""] + self.PENDING_METRICS)
+        self.assertEqual(0, code, out)
+        self.assertIn("release mode: 4 pending cell(s), 4 on the allowlist, 0 blocking", out)
+
+    def test_normal_mode_lets_pending_cells_pass_without_an_allowlist(self):
+        code, out = self.run_check()
+        self.assertEqual(0, code, out)
+        self.assertNotIn("release mode", out)
+
+    def test_release_allowlist_matches_the_metric_exactly(self):
+        listed = ["cache-hit p99 (k6 client-side)"] + self.PENDING_METRICS[1:]
+        code, out = self.run_release(listed)
+        self.assertEqual(1, code, out)
+        self.assertIn("blocks the release: 'Cache-hit p99 (k6 client-side)'", out)
+        self.assertIn("notice: allowlist entry matches no pending row: 'cache-hit p99 (k6 client-side)'", out)
+
+    def test_release_fails_on_two_pending_rows_with_the_same_metric(self):
+        row = ("| Answers correct | pending laptop run | fraction | test data, not a measurement | nomic-embed-text | "
+               "| `answers.grounded_fraction` |\n<!-- eval:end -->")
+        code, out = self.run_release(self.PENDING_METRICS, self.replaced("<!-- eval:end -->", row))
+        self.assertEqual(1, code, out)
+        self.assertIn("pending rows share the Metric 'Answers correct'", out)
+
+    def test_release_still_runs_every_number_check(self):
+        code, out = self.run_release(self.PENDING_METRICS, self.replaced("| 12.3 | ms |", "| 12.2 | ms |"))
+        self.assertEqual(1, code, out)
+        self.assertIn("Value 12.2 ms != 12.3 ms", out)
+
+    def test_main_release_without_the_allowlist_file_is_a_usage_error(self):
+        code = crn.main(["--readme", str(FIXTURES / "README.fixture.md"), "--summary-dir", str(self.summary_dir),
+                         "--results-dir", str(self.results_dir), "--release",
+                         "--allowlist", str(self.tmp / "no-such-allowlist.txt")])
+        self.assertEqual(2, code)
+
+    def test_repository_allowlist_exists_and_its_comments_name_no_row(self):
+        # Entries are the owner's decision (D-55), so only the file's presence and format are asserted here.
+        self.assertTrue(crn.ALLOWLIST.is_file())
+        self.assertFalse(any(e.startswith("#") for e in crn.read_allowlist(crn.ALLOWLIST)))
+
+
+class LinkCheckTest(unittest.TestCase):
+    """AC-t14-10: every relative link in the README and the runbook resolves to a committed file."""
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp(prefix="crn-links-"))
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        self.write("docs/HLD.md", "# HLD\n")
+        self.write("docs/process/DECISIONS.md", "# Decisions\n")
+        self.write("eval/README.md", "# Eval\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def write(self, rel, text, track=True):
+        path = self.root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        if track:
+            subprocess.run(["git", "-C", str(self.root), "add", rel], check=True)
+        return path
+
+    def check(self, readme, runbook="# Runbook\n"):
+        files = [self.write("README.md", readme), self.write("docs/RUNBOOK.md", runbook)]
+        failures = crn.Failures()
+        checked = crn.check_links(files, self.root, failures)
+        return checked, failures.items
+
+    GOOD = (
+        "# Title\n\n"
+        "[HLD](docs/HLD.md), [deep dive](docs/HLD.md#deep-dives), [eval dir](eval/), [status](#status),\n"
+        "[root-relative](/docs/process/DECISIONS.md), [site](https://example.com/x.md), <mailto:a@example.com>\n"
+        "<a href=\"docs/HLD.md\">html</a>\n\n"
+        "[ref]: docs/process/DECISIONS.md\n\n"
+        "```bash\ncat [x](missing-in-code.md)\n```\n\n"
+        "Inline `[x](missing-in-inline-code.md)` and <!-- [x](missing-in-comment.md) --> are not links.\n"
+    )
+
+    def test_ac_t14_10_resolving_links_pass_and_code_comments_and_urls_are_skipped(self):
+        checked, failures = self.check(self.GOOD, "See [decisions](process/DECISIONS.md) and [eval](../eval/README.md).\n")
+        self.assertEqual([], failures)
+        self.assertEqual(8, checked)  # 6 in the README, 2 in the runbook
+
+    def test_ac_t14_10_fails_on_a_broken_relative_link_in_the_readme(self):
+        _, failures = self.check(self.GOOD + "\n[gone](docs/GONE.md)\n")
+        self.assertEqual(1, len(failures), failures)
+        self.assertIn("README.md line 15: link 'docs/GONE.md' does not resolve to a committed file", failures[0])
+
+    def test_ac_t14_10_fails_on_a_broken_relative_link_in_the_runbook(self):
+        # Relative to the runbook's own directory: docs/docs/HLD.md does not exist.
+        _, failures = self.check(self.GOOD, "Read [the HLD](HLD.md), not [this](docs/HLD.md).\n")
+        self.assertEqual(1, len(failures), failures)
+        self.assertIn("docs/RUNBOOK.md line 1: link 'docs/HLD.md' does not resolve", failures[0])
+
+    def test_ac_t14_10_a_file_that_exists_but_is_not_committed_fails(self):
+        self.write("docs/notes.md", "draft\n", track=False)
+        _, failures = self.check("[notes](docs/notes.md)\n")
+        self.assertEqual(1, len(failures), failures)
+        self.assertIn("does not resolve to a committed file (docs/notes.md)", failures[0])
+
+    def test_ac_t14_10_a_link_outside_the_repository_fails(self):
+        _, failures = self.check("[up](../outside.md)\n")
+        self.assertIn("points outside the repository", failures[0])
+
+    def test_ac_t14_10_reference_definitions_and_html_links_are_checked(self):
+        _, failures = self.check("[x][r]\n\n[r]: docs/NOPE.md\n\n<a href=\"docs/ALSO-NOPE.md\">y</a>\n")
+        self.assertEqual(2, len(failures), failures)
+
+    def test_ac_t14_10_a_missing_image_fails_and_passes_once_committed(self):
+        readme = "![Grafana dashboard](docs/img/grafana-dashboard.png)\n<img src=\"docs/img/other.png\" alt=\"x\">\n"
+        _, failures = self.check(readme)
+        self.assertEqual(2, len(failures), failures)
+        self.assertIn("image 'docs/img/grafana-dashboard.png' is missing", failures[0])
+        self.assertIn("image 'docs/img/other.png' is missing", failures[1])
+        self.write("docs/img/grafana-dashboard.png", "png")
+        self.write("docs/img/other.png", "png")
+        _, failures = self.check(readme)
+        self.assertEqual([], failures)
+
+    def test_release_mode_fails_on_a_readme_image_whose_file_is_missing(self):
+        fixture = (FIXTURES / "README.fixture.md").read_text(encoding="utf-8")
+        readme = self.write("README.md", fixture + "\n![Grafana dashboard](docs/img/grafana-dashboard.png)\n")
+        runbook = self.write("docs/RUNBOOK.md", "# Runbook\n")
+        allowlist = self.write("allowlist.txt", "".join(m + "\n" for m in CheckReadmeNumbersTest.PENDING_METRICS))
+        args = dict(results_dir=FIXTURES / "results", results_schema_path=RESULTS_SCHEMA, release=True,
+                    allowlist_path=allowlist, link_files=[readme, runbook], repo_root=self.root)
+        out = io.StringIO()
+        code = crn.check(readme, FIXTURES / "summary", SCHEMA, out=out, **args)
+        self.assertEqual(1, code, out.getvalue())
+        self.assertIn("image 'docs/img/grafana-dashboard.png' is missing", out.getvalue())
+        self.write("docs/img/grafana-dashboard.png", "png")
+        out = io.StringIO()
+        code = crn.check(readme, FIXTURES / "summary", SCHEMA, out=out, **args)
+        self.assertEqual(0, code, out.getvalue())
+
+    def test_without_a_git_repository_the_link_check_fails_instead_of_passing(self):
+        plain = pathlib.Path(tempfile.mkdtemp(prefix="crn-nogit-"))
+        try:
+            (plain / "README.md").write_text("[x](y.md)\n", encoding="utf-8")
+            failures = crn.Failures()
+            env_dir = os.environ.get("GIT_CEILING_DIRECTORIES")
+            os.environ["GIT_CEILING_DIRECTORIES"] = str(plain.parent)
+            try:
+                crn.check_links([plain / "README.md"], plain, failures)
+            finally:
+                if env_dir is None:
+                    os.environ.pop("GIT_CEILING_DIRECTORIES")
+                else:
+                    os.environ["GIT_CEILING_DIRECTORIES"] = env_dir
+            self.assertIn("the link check did not run", failures.items[0])
+        finally:
+            shutil.rmtree(plain, ignore_errors=True)
+
+    def test_ac_t14_10_repository_readme_and_runbook_links_resolve(self):
+        failures = crn.Failures()
+        checked = crn.check_links([REPO / "README.md", REPO / "docs/RUNBOOK.md"], REPO, failures)
+        self.assertEqual([], failures.items)
+        self.assertGreater(checked, 0)
 
 
 if __name__ == "__main__":

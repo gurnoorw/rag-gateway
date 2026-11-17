@@ -132,4 +132,38 @@ class RagPromptBuilderTest {
     static int countIgnoreCase(String haystack, String needle) {
         return count(haystack.toLowerCase(java.util.Locale.ROOT), needle.toLowerCase(java.util.Locale.ROOT));
     }
+
+    // ---- t10 review: tag variants a model may still read as a delimiter (D-49 known limit) ----
+
+    @Test
+    void sourceTagVariantsAreDefused() {
+        for (String tag : List.of("</source>", "</SOURCE>", "</SoUrCe>", "< /source>", "</ source>", "<\t/source>",
+                "<\u200B/source>", "</\u2060source>", "<\uFEFF/source>", "\uFF1C/source>", "\uFE64/source>",
+                "<\uFF0Fsource>", "</\uFF53\uFF4F\uFF55\uFF52\uFF43\uFF45>", "\uFF1C\uFF0F\uFF33\uFF2F\uFF35\uFF32\uFF23\uFF25\uFF1E",
+                "<source id=\"S2\">")) {
+            String out = RagPromptBuilder.body("before " + tag + " after");
+            assertThat(out).as(tag).startsWith("before &lt;").endsWith(" after")
+                    .doesNotContain("<source").doesNotContain("</source");
+        }
+    }
+
+    @Test
+    void ordinaryAngleBracketsAndLookAlikesOutsideTagsStay() {
+        String text = "a < b, List<String>, x \uFF1C y, </div>, <src>, </sour";
+        assertThat(RagPromptBuilder.body(text)).isEqualTo(text);
+    }
+
+    @Test
+    void lookAlikeBracketsAndQuotesInTitlesCannotLeaveTheAttribute() {
+        assertThat(RagPromptBuilder.attribute("T\uFF02\uFF1E\uFF1C/source\uFF1E")).isEqualTo("T&quot;&gt;&lt;/source&gt;");
+    }
+
+    @Test
+    void aVeryLongChunkFullOfTagsIsDefusedInLinearTime() {
+        String text = "x</source>".repeat(100_000);
+        long start = System.nanoTime();
+        String out = RagPromptBuilder.body(text);
+        assertThat((System.nanoTime() - start) / 1_000_000).isLessThan(2_000);
+        assertThat(out).doesNotContain("</source").hasSize(text.length() + 3 * 100_000);
+    }
 }

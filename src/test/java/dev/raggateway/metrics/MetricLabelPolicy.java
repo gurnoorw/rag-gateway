@@ -56,6 +56,8 @@ final class MetricLabelPolicy {
                 Map.entry("direction", Set.of(RequestMetricsListener.IN, RequestMetricsListener.OUT)::contains),
                 Map.entry("component", Set.of("limiter", "budget", "cache")::contains),
                 Map.entry("reason", Set.of("rate_limited", "budget_exceeded", "too_large")::contains),
+                Map.entry("mode", Set.of("hybrid", "vector", "keyword")::contains),
+                Map.entry("leg", Set.of("keyword", "vector", "embed")::contains),
                 Map.entry("listener", v -> JAVA_SIMPLE_NAME.matcher(v).matches()),
                 Map.entry(PROMETHEUS_LE, v -> NUMBER.matcher(v).matches()));
         this.forbiddenFragments = Set.copyOf(forbiddenFragments);

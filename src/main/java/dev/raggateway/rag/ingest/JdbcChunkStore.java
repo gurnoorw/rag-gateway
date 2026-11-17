@@ -1,6 +1,7 @@
 package dev.raggateway.rag.ingest;
 
 import dev.raggateway.rag.ChunkText;
+import dev.raggateway.rag.PgVector;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -88,15 +89,9 @@ public final class JdbcChunkStore implements ChunkStore {
         return count == null ? 0 : count;
     }
 
-    /** pgvector text form. {@link Float#toString} round-trips exactly and pgvector parses its exponent form. */
+    /** pgvector text form; see {@link PgVector#literal}. */
     static String vectorLiteral(float[] v) {
-        StringBuilder sb = new StringBuilder(v.length * 12 + 2).append('[');
-        for (int i = 0; i < v.length; i++) {
-            if (!Float.isFinite(v[i])) throw new IllegalArgumentException("vector value " + i + " is not finite");
-            if (i > 0) sb.append(',');
-            sb.append(v[i]);
-        }
-        return sb.append(']').toString();
+        return PgVector.literal(v);
     }
 
     private record Row(ChunkText chunk, float[] vector) {

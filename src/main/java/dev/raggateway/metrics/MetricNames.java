@@ -67,8 +67,14 @@ public final class MetricNames {
     public static final String INGEST_DOCUMENTS = "rag.ingest.documents";
     /** Gauge. Outbox jobs currently dead. */
     public static final String OUTBOX_DEAD = "rag.outbox.dead";
-    /** Timer. Tags: mode (hybrid/vector/keyword). */
+    /** Timer. Tags: mode (hybrid/vector/keyword). Whole retrieval: embedding, both legs, fusion. */
     public static final String RETRIEVAL_DURATION = "rag.retrieval.duration";
+    /** Timer. Tags: leg (keyword/vector/embed). One retrieval step (t10, D-49). */
+    public static final String RETRIEVAL_LEG_DURATION = "rag.retrieval.leg.duration";
+    /** Distribution summary. Tags: leg (keyword/vector). Rows a leg returned; below the candidate count = under-fill. */
+    public static final String RETRIEVAL_CANDIDATES = "rag.retrieval.candidates";
+    /** Counter. Tags: tenant, result (answered/no_sources/error). One per {@code POST /v1/rag/query} (t10). */
+    public static final String RAG_QUERIES = "rag.queries";
 
     // Fixed label values (t04, D-38): a label value must come from a bounded set, never from the request.
     /** {@code provider} label when no provider was called (rejected before the terminal). */
@@ -83,7 +89,7 @@ public final class MetricNames {
     /** Labels allowed on {@code gateway.*} and {@code rag.*} metrics. Never request ids, keys or free text. */
     public static final Set<String> ALLOWED_LABELS = Set.of(
             "tenant", "provider", "model", "status_class", "code", "direction", "reason", "component",
-            "listener", "from_provider", "to_provider", "result", "operation", "rule", "kind", "mode");
+            "listener", "from_provider", "to_provider", "result", "operation", "rule", "kind", "mode", "leg");
 
     private MetricNames() {
     }

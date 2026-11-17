@@ -8,7 +8,7 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * RAG ingestion settings ({@code gateway.rag}, t09, DECISIONS.md D-47). Defaults live here; application.yml only
+ * RAG settings ({@code gateway.rag}): ingestion (t09, DECISIONS.md D-47) and retrieval and answering (t10, D-49). Defaults live here; application.yml only
  * overrides.
  *
  * @param embedder            which {@link Embedder} the app uses: {@code ollama} (default) or {@code fake}
@@ -22,6 +22,8 @@ import java.util.Objects;
  *                            503 {@code overloaded}): bounds the heap that document bodies can take
  * @param chunk               chunk sizes in estimated tokens
  * @param worker              the indexing worker
+ * @param retrieval           the two search legs and their fusion (t10, D-49)
+ * @param answer              the RAG answer request (t10, D-49)
  */
 @ConfigurationProperties("gateway.rag")
 public record RagProperties(
@@ -33,7 +35,9 @@ public record RagProperties(
         @DefaultValue("1MB") DataSize maxDocumentBytes,
         @DefaultValue("4") int maxConcurrentWrites,
         @DefaultValue Chunking chunk,
-        @DefaultValue Worker worker) {
+        @DefaultValue Worker worker,
+        @DefaultValue Retrieval retrieval,
+        @DefaultValue Answer answer) {
 
     public enum EmbedderKind { OLLAMA, FAKE }
 
@@ -44,6 +48,8 @@ public record RagProperties(
         embedTimeout = positive(embedTimeout, Duration.ofSeconds(60), "embed-timeout");
         chunk = chunk == null ? Chunking.defaults() : chunk;
         worker = worker == null ? Worker.defaults() : worker;
+        retrieval = retrieval == null ? Retrieval.defaults() : retrieval;
+        answer = answer == null ? Answer.defaults() : answer;
         require(embedDimensions > 0, "embed-dimensions must be > 0");
         require(embedBatchSize > 0, "embed-batch-size must be > 0");
         require(maxDocumentBytes.toBytes() > 0, "max-document-bytes must be > 0");
@@ -51,7 +57,7 @@ public record RagProperties(
     }
 
     public static RagProperties defaults() {
-        return new RagProperties(null, null, 768, 20, null, null, 4, null, null);
+        return new RagProperties(null, null, 768, 20, null, null, 4, null, null, null, null);
     }
 
     /**
@@ -96,6 +102,66 @@ public record RagProperties(
 
         public static Worker defaults() {
             return new Worker(true, null, 4, null);
+        }
+    }
+
+    /** pgvector HNSW iterative index scan mode ({@code hnsw.iterative_scan}, pgvector 0.8). */
+    public enum IterativeScan {
+        OFF, STRICT_ORDER, RELAXED_ORDER;
+
+        /** The value for {@code SET LOCAL hnsw.iterative_scan}. */
+        public String sqlValue() {
+            return name().toLowerCase(java.util.Locale.ROOT);
+        }
+    }
+
+    /**
+     * @param candidates    rows each leg returns before fusion (default 50)
+     * @param rrfK          reciprocal rank fusion constant: score = sum of 1 / (k + rank), rank 1-based (default 60)
+     * @param efSearch      {@code SET LOCAL hnsw.ef_search} for the vector leg (default 100). pgvector's default
+     *                      is 40, which caps an HNSW scan at 40 rows: fewer than the 50 candidates even with no
+     *                      filter. Must be at least {@code candidates}.
+     * @param iterativeScan {@code SET LOCAL hnsw.iterative_scan} (default {@code strict_order}): keeps scanning the
+     *                      index until the tenant, collection and ACL filter has let {@code candidates} rows
+     *                      through, in exact distance order (D-49; t12 proves the under-fill without it)
+     * @param maxScanTuples {@code SET LOCAL hnsw.max_scan_tuples} (default 20,000, pgvector's default): bounds the
+     *                      work of an iterative scan when the filter matches almost nothing
+     */
+    public record Retrieval(@DefaultValue("50") int candidates,
+                            @DefaultValue("60") int rrfK,
+                            @DefaultValue("100") int efSearch,
+                            @DefaultValue("strict_order") IterativeScan iterativeScan,
+                            @DefaultValue("20000") int maxScanTuples) {
+        public Retrieval {
+            iterativeScan = iterativeScan == null ? IterativeScan.STRICT_ORDER : iterativeScan;
+            require(candidates > 0 && candidates <= 200, "retrieval.candidates must be 1..200");
+            require(rrfK > 0, "retrieval.rrf-k must be > 0");
+            require(efSearch >= candidates && efSearch <= 1000, "retrieval.ef-search must be candidates..1000");
+            require(maxScanTuples > 0, "retrieval.max-scan-tuples must be > 0");
+        }
+
+        public static Retrieval defaults() {
+            return new Retrieval(50, 60, 100, IterativeScan.STRICT_ORDER, 20_000);
+        }
+    }
+
+    /**
+     * @param maxTokens        {@code max_tokens} of the answer request (default 512)
+     * @param maxQuestionChars longest question accepted (default 2,000 characters; 400 above)
+     * @param defaultTopK      chunks put in the prompt when the request names none (default 5; the request may
+     *                         ask for 1..20, {@link RetrievalQuery})
+     */
+    public record Answer(@DefaultValue("512") int maxTokens,
+                         @DefaultValue("2000") int maxQuestionChars,
+                         @DefaultValue("5") int defaultTopK) {
+        public Answer {
+            require(maxTokens > 0, "answer.max-tokens must be > 0");
+            require(maxQuestionChars > 0, "answer.max-question-chars must be > 0");
+            require(defaultTopK >= 1 && defaultTopK <= 20, "answer.default-top-k must be 1..20");
+        }
+
+        public static Answer defaults() {
+            return new Answer(512, 2000, 5);
         }
     }
 

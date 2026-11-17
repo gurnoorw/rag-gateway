@@ -1,0 +1,22 @@
+{
+  "run_id": "20261117T0000Z-test-data",
+  "measured_on": "test data, not a measurement",
+  "date": "2026-11-17",
+  "git_commit": "0000000",
+  "corpus": {
+    "repo": "kubernetes/website",
+    "commit": "adaa04d017c75981660828f869b364a266b0ef53",
+    "documents": 243,
+    "eval_set": "questions.v1",
+    "questions": 39
+  },
+  "embedder": {"kind": "none", "note": "test data, not a measurement"},
+  "retrieval": [
+    {"mode": "keyword", "chunk_target_tokens": 200, "questions": 28, "recall_at_1": 0.1, "recall_at_5": 0.2,
+     "recall_at_10": 0.3, "mrr": 0.2135, "ndcg_at_10": 0.25},
+    {"mode": "keyword", "chunk_target_tokens": 400, "questions": 28, "recall_at_1": 0.2, "recall_at_5": 0.4285,
+     "recall_at_10": 0.5, "mrr": 0.3, "ndcg_at_10": 0.35}
+  ],
+  "acl": {"mode": "keyword", "chunk_target_tokens": 400, "questions": 6, "unauthorised_leaked_chunks": 0,
+          "unauthorised_no_answer_fraction": 0.0, "authorised_recall_at_5": 0.5}
+}

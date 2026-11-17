@@ -269,6 +269,69 @@ Notes on the rows:
 - **S7, open streams.** Closed model: N virtual users each holding one ~5 s stream at a time, app at `-Xmx512m`. The largest step with zero errors is the one in the table; the next step (twice as many streams) ran out of heap (`OutOfMemoryError`), every stream in it failed, and its heap and thread peaks could not be sampled, so it has no rows. From N = 1000 up the peak heap sits close to the 512 MB limit, so heap, not threads, is what bounds this step size. Since this run the gateway sheds load instead of running out of heap: each instance serves at most `gateway.max-in-flight` concurrent `/v1` requests (a configured limit derived from this run, not a measurement) and answers the next one with 503 `overloaded` and `Retry-After: 1` (D-46). Peak heap is sampled every 0.5 s; peak virtual threads come from a thread dump every 2 s (`jvm_threads_live` counts platform threads only), so short peaks between dumps are missed. Pinning reports (`-Djdk.tracePinnedThreads=short`) appeared only right after startup, all in a lazy initializer inside the provider SDK (`kotlin.SynchronizedLazyImpl.getValue`), not in steady-state streaming.
 - **S7b, headers delayed.** The Claude mock holds its response headers past the first-token timeout; every request was answered by the Ollama fallback, and the abandoned Claude calls (D-37 c) stayed within the heap at this N.
 
+## Retrieval eval
+
+Retrieval quality on the demo corpus, measured against a versioned question set ([eval/README.md](eval/README.md), D-53). Every value is read from a committed results file, `eval/results/<Run>.json`, at the key in the last column. `python3 scripts/check_readme_numbers.py` checks this table too.
+
+How to read it:
+
+- **Questions.** The 28 answerable questions of `eval/questions.v1.jsonl` (18 conceptual, 10 field or flag names). Each has a gold document and an evidence passage copied from it. A retrieved chunk is relevant if it is from that document and holds the passage, or 60% of its words in one run.
+- **Metrics.** Recall@k is the share of questions with a relevant chunk in the top k. MRR is the mean reciprocal rank of the first relevant chunk (0 below rank 10). nDCG@10 uses binary relevance. Compare nDCG within one chunk size, not across sizes. One question is 1/28 (about 0.036) of any recall.
+- **Keyword rows are real here.** They use Postgres full-text ranking (`ts_rank_cd`, OR between terms, no IDF; not BM25), and no vectors are compared (Embedder `none`). The questions are paraphrased on purpose, which works against exact-word matching; questions that reuse the docs' own words would likely score higher.
+- **ACL rows.** The 6 `acl` questions are asked by a key that may not see their pages. Chunks it was shown that it may not see are counted by `AclAudit` from the chunk rows (must be 0). The same questions are then asked by a key that may see the pages (recall@5). The unauthorised key still gets chunks from the tutorials it may see, so its no-answer share is low; that is not a leak.
+- **Vector, hybrid and answer rows** need real embeddings (`nomic-embed-text` through Ollama) and, for answers, the judge. Neither runs in the build environment, so they read "pending laptop run" until a results file with that embedder is committed. Numbers from the fake embedder are never shown.
+
+Reproduce: load the corpus (`scripts/corpus/load_corpus.py`), then run `./gradlew eval --args="retrieval --modes keyword --measured-on '<hardware label>'"`. Add `--modes keyword,vector,hybrid --embedder nomic-embed-text` where Ollama runs.
+
+<!-- eval:begin -->
+| Metric | Value | Unit | Measured on | Embedder | Run | Source key |
+|---|---|---|---|---|---|---|
+| Recall@1, keyword, 200-token chunks | 0.179 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_1` |
+| Recall@5, keyword, 200-token chunks | 0.250 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_5` |
+| Recall@10, keyword, 200-token chunks | 0.321 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].recall_at_10` |
+| MRR, keyword, 200-token chunks | 0.214 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].mrr` |
+| nDCG@10, keyword, 200-token chunks | 0.221 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=200].ndcg_at_10` |
+| Recall@1, keyword, 400-token chunks | 0.250 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_1` |
+| Recall@5, keyword, 400-token chunks | 0.429 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_5` |
+| Recall@10, keyword, 400-token chunks | 0.500 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].recall_at_10` |
+| MRR, keyword, 400-token chunks | 0.328 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].mrr` |
+| nDCG@10, keyword, 400-token chunks | 0.369 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=400].ndcg_at_10` |
+| Recall@1, keyword, 800-token chunks | 0.179 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_1` |
+| Recall@5, keyword, 800-token chunks | 0.321 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_5` |
+| Recall@10, keyword, 800-token chunks | 0.429 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].recall_at_10` |
+| MRR, keyword, 800-token chunks | 0.265 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].mrr` |
+| nDCG@10, keyword, 800-token chunks | 0.304 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `retrieval[mode=keyword,chunk_target_tokens=800].ndcg_at_10` |
+| ACL questions, keyword, 400-token chunks | 6 | questions | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.questions` |
+| ACL: chunks leaked to the unauthorised key (AclAudit), keyword, 400-token chunks | 0 | chunks | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.unauthorised_leaked_chunks` |
+| ACL: unauthorised key got no chunks (no-answer share), keyword, 400-token chunks | 0.000 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.unauthorised_no_answer_fraction` |
+| ACL: authorised key recall@5, keyword, 400-token chunks | 0.667 | fraction | cloud container, 4 vCPU / 15 GB | none | 20261117T0434Z-cloud-container-4-vcpu-15-gb | `acl.authorised_recall_at_5` |
+| Recall@5, vector, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=200].recall_at_5` |
+| MRR, vector, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=200].mrr` |
+| nDCG@10, vector, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=200].ndcg_at_10` |
+| Recall@5, vector, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=400].recall_at_5` |
+| MRR, vector, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=400].mrr` |
+| nDCG@10, vector, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=400].ndcg_at_10` |
+| Recall@5, vector, 800-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=800].recall_at_5` |
+| MRR, vector, 800-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=800].mrr` |
+| nDCG@10, vector, 800-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=vector,chunk_target_tokens=800].ndcg_at_10` |
+| Recall@5, hybrid, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=200].recall_at_5` |
+| MRR, hybrid, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=200].mrr` |
+| nDCG@10, hybrid, 200-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=200].ndcg_at_10` |
+| Recall@5, hybrid, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=400].recall_at_5` |
+| MRR, hybrid, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=400].mrr` |
+| nDCG@10, hybrid, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=400].ndcg_at_10` |
+| Recall@5, hybrid, 800-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=800].recall_at_5` |
+| MRR, hybrid, 800-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=800].mrr` |
+| nDCG@10, hybrid, 800-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `retrieval[mode=hybrid,chunk_target_tokens=800].ndcg_at_10` |
+| ACL: chunks leaked to the unauthorised key (AclAudit), hybrid, 400-token chunks | pending laptop run | chunks | 8 GB laptop (not run yet) | nomic-embed-text | | `acl.unauthorised_leaked_chunks` |
+| ACL: unauthorised key got no chunks (no-answer share), hybrid, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `acl.unauthorised_no_answer_fraction` |
+| ACL: authorised key recall@5, hybrid, 400-token chunks | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `acl.authorised_recall_at_5` |
+| Answers fully correct (judge), hybrid, 400-token chunks, top 5 | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `answers.correct_fraction` |
+| Answers grounded in their cited sources (judge) | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `answers.grounded_fraction` |
+| Answers whose citations are all among the sources | pending laptop run | fraction | 8 GB laptop (not run yet) | nomic-embed-text | | `answers.citations_valid_fraction` |
+| Unanswerable questions refused | pending laptop run | questions | 8 GB laptop (not run yet) | nomic-embed-text | | `answers.unanswerable.refused` |
+<!-- eval:end -->
+
 ## Trade-offs
 
 | Choice | Taken | Rejected, and why | Decision |

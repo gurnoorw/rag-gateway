@@ -548,7 +548,7 @@ class RagAclLeakageIT extends AbstractIntegrationTest {
 
     void stubSecurityAwareClaude() {
         CLAUDE.stubFor(post("/v1/messages").atPriority(1).withRequestBody(containing("VAULTMARKER"))
-                .willReturn(claudeReply("Use the VAULTMARKER ceremony [S1].")));
+                .willReturn(claudeReply("Use the VAULTMARKER ceremony [S1][S2].")));
         CLAUDE.stubFor(post("/v1/messages").atPriority(2)
                 .willReturn(claudeReply("Use the token rotation job [S1].")));
     }
@@ -613,30 +613,128 @@ class RagAclLeakageIT extends AbstractIntegrationTest {
         }
     }
 
+    // ---- AC-t12-7: document group changes through the PUT (t11's acl_updated path) ----
+
+    static final String VAULT_DOC = "security.vault-token";
+    static final String VAULT_TEXT = "Rotate the vault root token with the VAULTMARKER ceremony and two key holders.";
+
+    @Autowired
+    dev.raggateway.rag.ingest.IndexingWorker worker;
+
+    HttpResponse<String> putDocument(String docId, String title, String content, List<String> groups)
+            throws Exception {
+        String body = JSON.writeValueAsString(Map.of("title", title, "content", content, "acl_groups", groups));
+        var request = HttpRequest.newBuilder(URI.create(
+                        baseUrl() + "/v1/rag/collections/" + COLLECTION + "/documents/" + docId))
+                .header("Authorization", "Bearer " + adminEmptyKey).header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(30)).PUT(HttpRequest.BodyPublishers.ofString(body)).build();
+        HttpResponse<String> r = http.send(request, HttpResponse.BodyHandlers.ofString());
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(202);
+        return r;
+    }
+
+    /** Drives the worker until this tenant has no pending job and the vault document is indexed. */
+    void indexAll() {
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(50))
+                .until(() -> {
+                    worker.pollOnce();
+                    return pendingJobs() == 0 && jdbc.sql("SELECT count(*) FROM documents WHERE tenant_id = ? "
+                            + "AND doc_id = ? AND status = 'indexed'").params(tenant, VAULT_DOC)
+                            .query(Long.class).single() == 1;
+                });
+    }
+
+    long pendingJobs() {
+        return jdbc.sql("""
+                        SELECT count(*) FROM outbox o JOIN documents d ON d.id = o.document_id
+                         WHERE d.tenant_id = ? AND o.status IN ('PENDING', 'IN_PROGRESS')""")
+                .param(tenant).query(Long.class).single();
+    }
+
     /**
-     * D-51 "Cache and ACL changes": once a chunk's groups no longer include the caller's, the caller retrieves
-     * different chunks, builds a different prompt and misses the cached answer. The groups are changed here with SQL,
-     * as t11's {@code acl_updated} path does inside its PUT transaction; AC-t12-7 repeats this through the PUT.
+     * Groups move from {@code security} to {@code legal} by a PUT of the same title and content: the PUT answers
+     * {@code acl_updated}, and with no worker run the key that lost the group no longer retrieves the document (ids,
+     * prompt, sources, citations) nor gets its earlier cached answer, while the key that gained the group does. The
+     * cache key holds the prompt (D-51), so the loser's new retrieval builds a new prompt and misses.
      */
     @Test
-    void aCachedAnswerDoesNotOutliveTheRemovalOfTheCallersGroupFromTheChunk() throws Exception {
+    void ac_t12_7_anAclUpdatedPutTakesEffectAtOnceWithoutAWorkerRunAndThroughTheCache() throws Exception {
         stubSecurityAwareClaude();
-        seedTokenDocs();
-        String securityAndEng = groupKeys.get("security");
+        RagFixtures.document(jdbc, tenant, COLLECTION, "eng.token-rotation", "Token rotation", Set.of("eng"),
+                embedder, "Rotate the application token with the token rotation job.");
+        putDocument(VAULT_DOC, "Vault root token", VAULT_TEXT, List.of("security"));
+        indexAll();
+        String loser = groupKeys.get("security");   // eng + security
+        String gainer = groupKeys.get("legal");     // eng + legal
+        String vaultChunk = chunkIdOf(tenant, VAULT_DOC);
 
-        Asked before = ask(securityAndEng, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
-        Asked cached = ask(securityAndEng, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
-        jdbc.sql("UPDATE chunks SET acl_groups = '{legal}' WHERE tenant_id = ? AND doc_id = 'security.vault-token'")
-                .param(tenant).update();
-        Asked after = ask(securityAndEng, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
+        // Before: the security key sees the document (and its answer is cached); the legal key does not.
+        Asked loserBefore = ask(loser, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
+        Asked loserCached = ask(loser, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
+        Asked gainerBefore = ask(gainer, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
+        assertThat(loserBefore.shownChunkIds()).contains(vaultChunk);
+        assertThat(loserBefore.prompt()).contains(VAULT_TEXT);
+        assertThat(loserBefore.body().get("answer").asText()).contains("VAULTMARKER");
+        assertThat(loserCached.cache()).as("positive: the answer was cached").isEqualTo("HIT");
+        assertThat(gainerBefore.shownChunkIds()).doesNotContain(vaultChunk);
+        assertThat(gainerBefore.response().body()).doesNotContain("VAULTMARKER");
 
-        assertThat(before.body().get("answer").asText()).contains("VAULTMARKER");
-        assertThat(cached.cache()).as("positive: the answer was cached").isEqualTo("HIT");
-        assertThat(after.cache()).isEqualTo("MISS");
-        assertThat(after.response().body()).doesNotContain("VAULTMARKER");
-        assertThat(after.prompt()).doesNotContain("VAULTMARKER");
-        assertThat(audit.leakedChunkIds(tenant, COLLECTION, Set.of("eng", "security"), after.shownChunkIds()))
+        HttpResponse<String> put = putDocument(VAULT_DOC, "Vault root token", VAULT_TEXT, List.of("legal"));
+
+        assertThat(JSON.readTree(put.body()).get("status").asText()).isEqualTo("acl_updated");
+        assertThat(pendingJobs()).as("no job queued, no worker run").isZero();
+        assertThat(groupsOfChunk(vaultChunk)).containsExactly("legal");   // same chunk, new groups
+        for (RetrievalMode mode : RetrievalMode.values()) {
+            Asked loserAfter = ask(loser, COLLECTION, TOKEN_QUESTION, mode, false);
+            assertThat(loserAfter.cache()).as(mode + ": the cached answer is not served").isEqualTo("MISS");
+            assertThat(loserAfter.shownChunkIds()).as(mode.name()).doesNotContain(vaultChunk)
+                    .contains(chunkIdOf(tenant, "eng.token-rotation"));
+            assertThat(audit.leakedChunkIds(tenant, COLLECTION, Set.of("eng", "security"), loserAfter.shownChunkIds()))
+                    .isEmpty();
+            assertThat(loserAfter.prompt()).doesNotContain("VAULTMARKER").doesNotContain(VAULT_DOC);
+            assertThat(loserAfter.response().body()).doesNotContain("VAULTMARKER").doesNotContain(VAULT_DOC);
+
+            Asked gainerAfter = ask(gainer, COLLECTION, TOKEN_QUESTION, mode, true);
+            assertThat(gainerAfter.shownChunkIds()).as(mode + ": the gainer sees it").contains(vaultChunk);
+            assertThat(gainerAfter.prompt()).contains(VAULT_TEXT);
+            assertThat(gainerAfter.body().get("citations").findValuesAsText("doc_id")).contains(VAULT_DOC);
+        }
+        // A key with neither group never saw it.
+        assertThat(ask(engKey, COLLECTION, TOKEN_QUESTION, RetrievalMode.HYBRID, true).shownChunkIds())
+                .doesNotContain(vaultChunk);
+    }
+
+    /**
+     * A content change with new groups is a full job (status {@code queued}); once the worker has run, the key that
+     * lost the group no longer retrieves the document or its cached answer, and the key that gained it retrieves the
+     * new text.
+     */
+    @Test
+    void ac_t12_7_aContentChangeWithNewGroupsHoldsOnceTheWorkerHasRun() throws Exception {
+        stubSecurityAwareClaude();
+        RagFixtures.document(jdbc, tenant, COLLECTION, "eng.token-rotation", "Token rotation", Set.of("eng"),
+                embedder, "Rotate the application token with the token rotation job.");
+        putDocument(VAULT_DOC, "Vault root token", VAULT_TEXT, List.of("security"));
+        indexAll();
+        String loser = groupKeys.get("security");
+        String gainer = groupKeys.get("sre");
+        String newText = "Rotate the vault root token with the VAULTMARKER-V2 ceremony and three key holders.";
+        assertThat(ask(loser, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false).prompt()).contains(VAULT_TEXT);
+
+        HttpResponse<String> put = putDocument(VAULT_DOC, "Vault root token", newText, List.of("sre"));
+        assertThat(JSON.readTree(put.body()).get("status").asText()).isEqualTo("queued");
+        indexAll();
+
+        Asked loserAfter = ask(loser, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, false);
+        Asked gainerAfter = ask(gainer, COLLECTION, TOKEN_QUESTION, RetrievalMode.KEYWORD, true);
+        assertThat(loserAfter.cache()).isEqualTo("MISS");
+        assertThat(loserAfter.sourceDocIds()).doesNotContain(VAULT_DOC).contains("eng.token-rotation");
+        assertThat(loserAfter.prompt()).doesNotContain("VAULTMARKER");
+        assertThat(loserAfter.response().body()).doesNotContain("VAULTMARKER");
+        assertThat(audit.leakedChunkIds(tenant, COLLECTION, Set.of("eng", "security"), loserAfter.shownChunkIds()))
                 .isEmpty();
+        assertThat(gainerAfter.sourceDocIds()).contains(VAULT_DOC);
+        assertThat(gainerAfter.prompt()).contains(newText).doesNotContain(VAULT_TEXT);
     }
 
     // ---- key group changes: within the key cache TTL (D-23, D-51) ----

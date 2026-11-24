@@ -466,7 +466,7 @@ python3 -m unittest discover -s scripts/tests -v                        # tests 
 
 The steps that need the target laptop, real models or a provider API key (the laptop benchmark, the retrieval eval with `nomic-embed-text`, the judged answer eval with its calibration, the dashboard screenshot and a live Claude check) are in the [release runbook](docs/RUNBOOK.md), each with its command and a checkable "done".
 
-`python3 scripts/check_readme_numbers.py --release` adds one rule to the normal check: every "pending" cell in the measured and eval tables blocks the release unless its Metric text is a line of [`docs/process/release-pending-allowlist.txt`](docs/process/release-pending-allowlist.txt). The file names nothing by default, so shipping without a number is an explicit, reviewable choice (D-55). `bash scripts/release_check.sh` runs that check with the other release checks (fresh-clone build, history secrets scan, decision index, Mermaid, licence, version and changelog, wording). The repository has no licence file yet: choosing one is an open decision (D-55), and the release check fails until it exists.
+`python3 scripts/check_readme_numbers.py --release` adds one rule to the normal check: every "pending" cell in the measured and eval tables blocks the release unless its Metric text is a line of [`docs/process/release-pending-allowlist.txt`](docs/process/release-pending-allowlist.txt). The file names nothing by default, so shipping without a number is an explicit, reviewable choice (D-55). `bash scripts/release_check.sh` runs that check with the other release checks (fresh-clone build, history secrets scan, decision index, Mermaid, licence, version and changelog, wording). The project is licensed under the Apache License 2.0 (D-57).
 
 ## Demo corpus
 
@@ -483,3 +483,7 @@ The RAG demo indexes documentation from [kubernetes/website](https://github.com/
 - [Team rules](docs/process/TEAM_RULES.md): branches, tests, ownership, public wording
 - [Release runbook](docs/RUNBOOK.md): the laptop, real-model and release steps, each with a checkable "done"
 - [Eval set and method](eval/README.md): questions, gold passages, metrics, the judge
+
+## License
+
+Copyright The rag-gateway authors. Licensed under the [Apache License, Version 2.0](LICENSE). The demo corpus is not part of this repository and keeps its own licence (CC BY 4.0, see [Demo corpus](#demo-corpus)).

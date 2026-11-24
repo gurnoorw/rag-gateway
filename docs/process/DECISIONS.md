@@ -93,6 +93,7 @@ Part 1 settles the 27 conflicts found in the requirements review (C1–C27). Par
 | D-54 | t13 review rulings | outbox claim via materialised CTE (D-47 amendment); keyword ties by doc id and ordinal; fake eval runs in their own tenant; keyword results re-run; misses checked by hand; README status and eval limits |
 | D-55 | Release preparation (t14 prep) | owner runbook; one release-check script; eval key seed script; pending cells block release unless allowlisted; wording patterns kept private; licence, tag and resume line are the owner's |
 | D-56 | t14 review and final pass | Dev A/B release-check choices accepted; a skipped wording scan fails the release; README and plan status corrected |
+| D-57 | Project licence | Apache-2.0, chosen by the owner; canonical text from apache.org |
 
 ---
 
@@ -1138,3 +1139,9 @@ A developer who cannot verify something says so in the PR and stops; nothing is 
   - **Clean-up:** no TODO or FIXME markers in tracked files. The branch and worktree names in TEAM_RULES, WORK_PLAN and D-25 describe the process as it ran, so they stay.
 - **Release state here:** `release_check.sh --skip-build` reports FAIL only for `readme` (the laptop-pending cells) and `license` (D-55), plus the SKIP of the build it was told to skip. The full build and the static checks pass.
 
+### D-57. Project licence
+- **Decision (owner):** Apache License 2.0. This settles owner decision 1 of D-55.
+- **Text:** `LICENSE` is the canonical file from https://www.apache.org/licenses/LICENSE-2.0.txt, unchanged (SHA-256 `cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30`).
+- **Why:** an explicit patent grant and contribution terms, common for JVM infrastructure, and compatible with every dependency in the build.
+- **Not affected:** the demo corpus (CC BY 4.0) is fetched at run time, never committed, and keeps its own licence and attribution (`data/CORPUS_ATTRIBUTION.md`).
+- **No NOTICE file:** the project bundles no third-party code that requires one.

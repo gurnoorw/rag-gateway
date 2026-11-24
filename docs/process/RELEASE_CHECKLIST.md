@@ -26,7 +26,7 @@ or on the laptop.
       `python3 scripts/check_readme_numbers.py --release` passes.
 
 ## 3. Owner decisions (D-55)
-- [ ] Licence chosen and a `LICENSE` file committed (recommendation: Apache-2.0; agents never add one).
+- [x] Licence chosen and a `LICENSE` file committed: Apache-2.0, chosen by the owner (D-57).
 - [ ] Pending cells allowed at release written to `docs/process/release-pending-allowlist.txt`, or none (the
       default: the file stays empty).
 - [ ] `private/wording-patterns.txt` up to date (gitignored; never committed), so the wording scan runs instead

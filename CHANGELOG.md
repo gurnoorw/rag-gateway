@@ -15,6 +15,8 @@ Spring Boot 3.5, with Postgres (pgvector) and Redis.
 
 ### Added
 
+- Apache License 2.0 (`LICENSE`), chosen by the owner (D-57).
+
 #### Foundation (t00)
 - Design documents (HLD, LLD, concepts, roadmap), the decision log for the 27 conflicts between them (C1–C27) and
   the technical decisions, and a two-developer work plan with team rules (D-25).
